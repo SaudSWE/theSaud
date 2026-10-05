@@ -1,0 +1,6 @@
+# Python bytecode caches -- generated on import/compile, never source.
+__pycache__/
+*.py[cod]
+
+# Runtime secrets for streamwatch. Never commit these.
+.streamwatch_env
