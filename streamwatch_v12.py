@@ -2597,10 +2597,12 @@ def fetch_commands(user, password, imap_server, allow_from, scan=20, seen=None,
     throttles, unthrottles = [], []
     want_devices = [False]
     want_zones = [False]
+    want_rules = [False]
     browsing = []
     locating = []
     forbids = []                  # [(value, unit), ...]  unit in {"m","dbm"}
     unforbid = [False]
+    ports = []                    # [(verb, target, lo, hi, proto), ...]
     calibrations = []
     examined = 0
     box = None
@@ -2643,9 +2645,11 @@ def fetch_commands(user, password, imap_server, allow_from, scan=20, seen=None,
             zoneq = bool(ZONES_CMD.search(body))
             fbd = FORBID_CMD.findall(body)
             unfbd = bool(UNFORBID_CMD.search(body))
+            prt = parse_port_rules(body)
+            rulesq = bool(RULES_CMD.search(body))
             cal = CALIBRATE_CMD.findall(body)
             if not (c or o or lim or unlim or thr or unthr or devq or brw
-                    or loc or zoneq or fbd or unfbd or cal):
+                    or loc or zoneq or fbd or unfbd or prt or rulesq or cal):
                 continue
             if not any(a.lower() in sender.lower() for a in allow_from):
                 notes.append("[command REFUSED] command from %s is not on the "
@@ -2672,8 +2676,13 @@ def fetch_commands(user, password, imap_server, allow_from, scan=20, seen=None,
                 want_devices[0] = True
             if zoneq:
                 want_zones[0] = True
+            if rulesq:
+                want_rules[0] = True
             if unfbd:
                 unforbid[0] = True
+            for item in prt:
+                if item not in ports:
+                    ports.append(item)
             for target in brw:
                 if target not in browsing:
                     browsing.append(target)
@@ -2702,6 +2711,8 @@ def fetch_commands(user, password, imap_server, allow_from, scan=20, seen=None,
                                       "zones": want_zones[0],
                                       "forbids": forbids,
                                       "unforbid": unforbid[0],
+                                      "ports": ports,
+                                      "rules": want_rules[0],
                                       "calibrations": calibrations}
     except Exception as e:
         return [], [], ["[commands: could not read inbox: %s]" % e], {}
@@ -2800,6 +2811,21 @@ def command_watcher(cfg, nets, interval, dry_run, allow_from, mode="full",
                                  + "\n".join(zone_status_lines()) + "\n")
             except Exception as e:
                 print("  [zones: email FAILED: %s]" % e)
+        for verb, target, lo, hi, proto in extra.get("ports", []):
+            print("  " + port_rule_cmd(verb, target, lo, hi, proto, nets))
+        if extra.get("rules"):
+            print("  [rules: %d port rule(s), report sent]" % len(PORT_RULES))
+            try:
+                send_email_alert(cfg["server"], cfg["port"], cfg["user"],
+                                 cfg["password"], cfg["to"],
+                                 "[streamwatch] port rules - %d" % len(PORT_RULES),
+                                 port_rules_body(names=hostname_map()))
+            except Exception as e:
+                print("  [rules: email FAILED: %s]" % e)
+        # close(), forbid() and the gate insert at the head of FORWARD; an
+        # allow must stay in front of every drop, so put the hook back.
+        if PORT_RULES and ports_rehook():
+            print("  [ports: chain moved back to the head of FORWARD]")
         if extra.get("devices"):
             devices_update(nets)
             body = devices_report_body(nets)
@@ -4399,7 +4425,11 @@ def _forbidden_body(kind, ip, name, mac, loc, st):
         % ("entry" if arrive else "exit",
            ip or "unknown", name or "-", mac, loc.get("iface", "?"),
            head, location_text(loc), loc.get("basis", "-"),
-           datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+           datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        + ("\nNOTE: allow rule(s) keep %s open for this device even inside "
+           "the area.\nSend rules() to see them, unallow(...) to close them.\n"
+           % ", ".join(port_allows_for(mac)) if arrive and port_allows_for(mac)
+           else ""))
 
 
 def zone_eval_mac(mac, loc, ip, name, nets, cfg, now):
@@ -4434,6 +4464,10 @@ def zone_eval_mac(mac, loc, ip, name, nets, cfg, now):
         print("FORBID %s  %s entered forbidden area -- %s  [%s]"
               % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), label, res,
                  loc["basis"]))
+        holes = port_allows_for(mac)
+        if holes:
+            print("       note: allow rule(s) keep %s open for this device"
+                  % ", ".join(holes))
         _zone_email(cfg, "enter", ip, name, mac, loc, st, now, label)
         return
 
@@ -4710,6 +4744,409 @@ def unforbid_runtime():
             "it entirely with:\n  %s" % (released, zone_teardown()))
 
 
+# ------------------------------------------------------------- port rules
+#
+# ADDED. Per-device, per-port control: block(ip, port) / allow(ip, port).
+#
+# close()/open() and the gate decide whether a DEVICE may forward at all. The
+# forbidden area decides it by location. None of them can say "this device,
+# but not port 443" -- that is what these rules add. One chain, at the head
+# of FORWARD:
+#
+#     SW_PORTS:  ACCEPT <mac> dport 80           <- allow(x.x.x.x, 80)
+#                ACCEPT       dport 53           <- allow(*, 53)
+#                DROP   <mac> dport 443          <- block(x.x.x.x, 443)
+#                DROP         dport 23           <- block(*, 23)
+#                (fall through: no rule here applies to this packet)
+#
+# ALLOWS FIRST, AND THEY ACCEPT
+#     An allow is the hole you punch for a device that is otherwise shut: a
+#     gated (unknown) device that may reach port 80 and nothing else, a
+#     device the forbidden area cut that must keep its VoIP port. That only
+#     works if the allow is judged before the drop, so the chain sits at the
+#     head of FORWARD -- and is put back there whenever something else
+#     (close(), the gate, the forbidden area) inserts in front of it -- and
+#     an allow ACCEPTs rather than RETURNs: RETURN would fall back into the
+#     very drops it exists to beat. The cost, stated plainly: an allow wins
+#     over everything in FORWARD for that device and port -- the gate, the
+#     forbidden area, a forward-mode close(), every block -- and is judged
+#     before OpenWrt's own forwarding rules. What it cannot beat is a
+#     full-mode close(): a deauthenticated device has no link for any port
+#     to travel over.
+#
+# DESTINATION PORT, DEVICE AS SOURCE
+#     block(x, 443) means x may not reach port 443 anywhere -- the port on
+#     the far end, the one that names a service. The match is the device's
+#     MAC as the frame's source on the LAN interface, for the reason every
+#     other control here uses MAC: a new lease must not shed the rule. Only
+#     forwarded traffic is covered; a port on the router itself (its SSH,
+#     its web UI) is INPUT and is not touched.
+#
+# PERSISTED, LIKE QUOTAS
+#     Rules are written to PORT_RULES_FILE and re-applied at startup, so a
+#     restart of the tool does not silently undo a policy. The chain is
+#     rebuilt from the list on every change rather than edited in place:
+#     one source of truth, so the live chain cannot drift from the list.
+
+PORT_CHAIN = "SW_PORTS"
+PORT_RULES_FILE = "/root/.streamwatch_ports.json"
+PORT_RULES = []        # [{"action","mac","label","lo","hi","proto","added"}]
+PORTS = {"on": False, "ifaces": [], "dry_run": False}
+PORTS_LOCK = threading.RLock()   # the poll loop and the command thread both
+                                 # touch the chain; one at a time
+PORT_PROTOS = ("tcp", "udp")
+
+# block(192.168.8.50, 443)   block(*, 23)   block(192.168.8.50, 6881-6889, udp)
+# allow(192.168.8.50, 80)    unblock(...)   unallow(...)   -- the same shapes.
+# \b in front of the verb keeps "block(" from matching inside "unblock(".
+PORT_CMD = re.compile(
+    r"\b(block|allow|unblock|unallow)\s*\(\s*(\*|\d{1,3}(?:\.\d{1,3}){3})"
+    r"\s*[,;\s]\s*(\d{1,5})(?:\s*-\s*(\d{1,5}))?"
+    r"(?:\s*[,;\s]\s*(tcp|udp|both|any))?\s*\)", re.I)
+RULES_CMD = re.compile(r"\brules\s*\(\s*\)", re.I)
+
+
+def parse_port_rules(text):
+    """[(verb, target, lo, hi, proto), ...] from block/allow/unblock/unallow.
+
+    A port outside 1-65535, a backwards range, or a target that is not an IP
+    is dropped rather than guessed at -- the same stance as limit(): a rule
+    built from a misread number blocks the wrong thing with no feedback.
+    """
+    out = []
+    for verb, target, lo, hi, proto in PORT_CMD.findall(text or ""):
+        try:
+            lo_n = int(lo)
+            hi_n = int(hi) if hi else lo_n
+        except ValueError:
+            continue
+        if not (1 <= lo_n <= 65535 and lo_n <= hi_n <= 65535):
+            continue
+        if target != "*":
+            try:
+                ip_to_int(target)
+            except ValueError:
+                continue
+        p = (proto or "both").lower()
+        if p == "any":
+            p = "both"
+        item = (verb.lower(), target, lo_n, hi_n, p)
+        if item not in out:
+            out.append(item)
+    return out
+
+
+def port_span_text(lo, hi, proto):
+    span = "%d" % lo if lo == hi else "%d-%d" % (lo, hi)
+    return "%s %s" % ("tcp+udp" if proto == "both" else proto, span)
+
+
+def _port_rule_key(r):
+    return (r["action"], r["mac"], r["lo"], r["hi"], r["proto"])
+
+
+def ports_ipt(*args):
+    if PORTS["dry_run"]:
+        print("      [ports DRY RUN] iptables %s" % " ".join(args))
+        return 0, ""
+    try:
+        p = subprocess.run(["iptables"] + list(args), stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=20)
+        return p.returncode, p.stderr.decode("utf-8", "replace").strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, str(e)
+
+
+def ports_load():
+    try:
+        import json
+        with open(PORT_RULES_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        return PORT_RULES
+    if not isinstance(data, list):
+        return PORT_RULES
+    good = []
+    for r in data:
+        if not isinstance(r, dict):
+            continue
+        try:
+            lo, hi = int(r["lo"]), int(r["hi"])
+            mac = str(r["mac"]).lower()
+            proto = str(r.get("proto", "both")).lower()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if r.get("action") not in ("allow", "block"):
+            continue
+        if not (1 <= lo <= hi <= 65535):
+            continue
+        if mac != "*" and not GATE_MAC.match(mac):
+            continue
+        if proto not in PORT_PROTOS + ("both",):
+            continue
+        rec = {"action": r["action"], "mac": mac, "label": str(r.get("label", mac)),
+               "lo": lo, "hi": hi, "proto": proto,
+               "added": float(r.get("added", 0) or 0)}
+        if _port_rule_key(rec) not in [_port_rule_key(g) for g in good]:
+            good.append(rec)
+    PORT_RULES[:] = good
+    return PORT_RULES
+
+
+def ports_save():
+    try:
+        import json
+        tmp = PORT_RULES_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(PORT_RULES, f)
+        os.replace(tmp, PORT_RULES_FILE)
+    except Exception as e:
+        print("  [ports: could not save %s: %s]" % (PORT_RULES_FILE, e))
+
+
+def _port_match_args(r, proto):
+    args = []
+    if r["mac"] != "*":
+        args += ["-m", "mac", "--mac-source", r["mac"]]
+    args += ["-p", proto, "--dport",
+             "%d" % r["lo"] if r["lo"] == r["hi"] else "%d:%d" % (r["lo"], r["hi"])]
+    return args
+
+
+def _ports_hook_front():
+    """Delete every SW_PORTS jump from FORWARD and re-insert one per LAN
+    interface at position 1. Called under PORTS_LOCK."""
+    for iface in PORTS["ifaces"]:
+        n = 0
+        while n < 50:
+            rc, _ = ports_ipt("-D", "FORWARD", "-i", iface, "-j", PORT_CHAIN)
+            if rc != 0:
+                break
+            n += 1
+    for iface in PORTS["ifaces"]:
+        ports_ipt("-I", "FORWARD", "1", "-i", iface, "-j", PORT_CHAIN)
+
+
+def ports_hook_is_front():
+    """True if the first len(ifaces) rules of FORWARD are all our jumps --
+    which is the only arrangement where nothing can drop before an allow."""
+    n = len(PORTS["ifaces"])
+    lines = [l for l in run(["iptables", "-S", "FORWARD"]).splitlines()
+             if l.startswith("-A FORWARD")]
+    head = lines[:n]
+    return len(head) == n and all(("-j %s" % PORT_CHAIN) in l for l in head)
+
+
+def ports_rehook():
+    """Put the chain back at the head of FORWARD if something -- close(),
+    the gate, the forbidden area -- has inserted in front of it since.
+
+    Only needed while an allow exists: every hook here is inserted at
+    position 1, ahead of OpenWrt's own rules, so a block drops wherever it
+    sits among them; an allow must be ahead of every drop. In dry-run mode
+    nothing was really inserted, so the check would fire every poll; skip it.
+    Returns True if the hook was moved.
+    """
+    with PORTS_LOCK:
+        if not PORTS["on"] or not PORTS["ifaces"] or PORTS["dry_run"]:
+            return False
+        if not any(r["action"] == "allow" for r in PORT_RULES):
+            return False
+        if ports_hook_is_front():
+            return False
+        _ports_hook_front()
+        return True
+
+
+def ports_apply():
+    """Rebuild SW_PORTS from PORT_RULES and hook it. Returns a report line."""
+    with PORTS_LOCK:
+        if not PORTS["ifaces"]:
+            PORTS["ifaces"] = gate_ifaces()
+        if not PORTS["ifaces"]:
+            return "[ports] no LAN interface found -- rules NOT applied"
+        if not run(["which", "iptables"]).strip():
+            return ("[ports] iptables not found. On an nftables-only build these "
+                    "rules do not apply -- rules NOT applied")
+
+        ports_ipt("-N", PORT_CHAIN)
+        ports_ipt("-F", PORT_CHAIN)
+        n, failed = 0, []
+        for action in ("allow", "block"):          # allows first: they win
+            for r in PORT_RULES:
+                if r["action"] != action:
+                    continue
+                protos = PORT_PROTOS if r["proto"] == "both" else (r["proto"],)
+                for proto in protos:
+                    rc, err = ports_ipt("-A", PORT_CHAIN,
+                                        *(_port_match_args(r, proto)
+                                          + ["-j", "ACCEPT" if action == "allow"
+                                             else "DROP"]))
+                    if rc == 0:
+                        n += 1
+                    else:
+                        failed.append("%s %s: %s" % (action, port_span_text(
+                            r["lo"], r["hi"], proto), err or "failed"))
+        _ports_hook_front()
+        PORTS["on"] = True
+
+    out = ("[ports] %d rule(s) -> %d iptables entries on %s%s"
+           % (len(PORT_RULES), n, "+".join(PORTS["ifaces"]),
+              "  [DRY RUN]" if PORTS["dry_run"] else ""))
+    if failed:
+        out += "\n      NOT applied: %s" % "; ".join(failed)
+    return out
+
+
+def ports_teardown():
+    parts = []
+    for iface in PORTS["ifaces"]:
+        parts.append("while iptables -D FORWARD -i %s -j %s 2>/dev/null; do :; "
+                     "done" % (iface, PORT_CHAIN))
+    parts.append("iptables -F %s; iptables -X %s" % (PORT_CHAIN, PORT_CHAIN))
+    return " ; ".join(parts)
+
+
+def _ports_overlap(a, b):
+    """Do two rules touch the same device, port and protocol anywhere?"""
+    if a["mac"] != "*" and b["mac"] != "*" and a["mac"] != b["mac"]:
+        return False
+    if a["lo"] > b["hi"] or b["lo"] > a["hi"]:
+        return False
+    if a["proto"] != "both" and b["proto"] != "both" and a["proto"] != b["proto"]:
+        return False
+    return True
+
+
+def port_allows_for(mac):
+    """Spans an allow keeps open for this device -- the forbidden area and
+    close() say so when they cut a device, so the hole is not a surprise."""
+    return [port_span_text(r["lo"], r["hi"], r["proto"]) for r in PORT_RULES
+            if r["action"] == "allow" and r["mac"] in ("*", mac)]
+
+
+def port_rule_cmd(verb, target, lo, hi, proto, nets):
+    """One block/allow/unblock/unallow command. Refusals first, announced.
+
+    The refusals are the same ones close() applies, for the same reason: a
+    forged email must not be able to point this at the router or at the
+    machine administering it.
+    """
+    action = "allow" if verb in ("allow", "unallow") else "block"
+    remove = verb.startswith("un")
+    span = port_span_text(lo, hi, proto)
+
+    if target == "*":
+        mac = "*"
+        who = "all devices"
+    else:
+        if not any(in_net(target, n) for n in nets):
+            return ("[%s REFUSED] %s is not on a LAN subnet -- rules apply to "
+                    "local devices, not to internet hosts" % (verb, target))
+        if target in local_addresses():
+            return "[%s REFUSED] %s is this router" % (verb, target)
+        peer = ssh_peer()
+        if peer and target == peer:
+            return ("[%s REFUSED] %s is the address administering this router"
+                    % (verb, target))
+        mac = mac_for_ip(target)
+        if not mac:
+            return ("[%s REFUSED] no MAC known for %s -- not in the ARP table "
+                    "or lease file, so the device cannot be identified"
+                    % (verb, target))
+        if peer and mac == mac_for_ip(peer):
+            return ("[%s REFUSED] %s is the same device administering this "
+                    "router" % (verb, target))
+        who = "%s (%s)" % (target, mac)
+
+    key = (action, mac, lo, hi, proto)
+    rec = {"action": action, "mac": mac, "label": target, "lo": lo, "hi": hi,
+           "proto": proto, "added": time.time()}
+
+    if remove:
+        before = len(PORT_RULES)
+        PORT_RULES[:] = [r for r in PORT_RULES if _port_rule_key(r) != key]
+        if len(PORT_RULES) == before:
+            return "[%s] no such rule: %s %s for %s" % (verb, action, span, who)
+        ports_save()
+        return ("*** %s %s for %s REMOVED *** %d rule(s) remain\n      %s"
+                % (action.upper(), span, who, len(PORT_RULES), ports_apply()))
+
+    if any(_port_rule_key(r) == key for r in PORT_RULES):
+        return "[%s SKIPPED] %s %s for %s is already present" % (
+            verb, action, span, who)
+
+    PORT_RULES.append(rec)
+    ports_save()
+    note = ""
+    if action == "block":
+        holes = [r for r in PORT_RULES
+                 if r["action"] == "allow" and _ports_overlap(r, rec)]
+        if holes:
+            note = ("\n      NOTE: an allow overlaps this (%s) and allows win -- "
+                    "unallow it for the block to take effect"
+                    % ", ".join("%s for %s" % (port_span_text(h["lo"], h["hi"],
+                                                              h["proto"]),
+                                               "all devices" if h["mac"] == "*"
+                                               else h["label"])
+                                for h in holes))
+    else:
+        note = ("\n      an allow is an ACCEPT: it beats the gate, the forbidden "
+                "area, a forward-mode close() and every block for this device "
+                "and port. It cannot help a device close() has deauthenticated.")
+    return ("*** %s %s for %s *** %s%s\n      undo: send %s(%s, %s%s)"
+            % (action.upper(), span, who, ports_apply(), note,
+               "unallow" if action == "allow" else "unblock", target,
+               "%d" % lo if lo == hi else "%d-%d" % (lo, hi),
+               "" if proto == "both" else ", %s" % proto))
+
+
+def port_rules_lines(names=None):
+    """One line per rule, allows first, the order the chain applies them."""
+    names = names or hostname_map()
+    out = []
+    for action in ("allow", "block"):
+        for r in sorted((r for r in PORT_RULES if r["action"] == action),
+                        key=lambda r: (r["mac"] != "*", r["label"], r["lo"])):
+            if r["mac"] == "*":
+                who = "* (all devices)"
+            else:
+                ip = ip_for_mac(r["mac"]) or r["label"]
+                name = names.get(ip, "")
+                who = "%s (%s)" % (ip, name or r["mac"])
+            when = (datetime.fromtimestamp(r["added"]).strftime("%Y-%m-%d %H:%M")
+                    if r["added"] else "-")
+            out.append("%-6s %-32s %-18s added %s"
+                       % (action.upper(), who[:32],
+                          port_span_text(r["lo"], r["hi"], r["proto"]), when))
+    return out
+
+
+def port_rules_body(names=None):
+    """The rules() report."""
+    lines = ["streamwatch - port rules", "",
+             "Generated: %s" % datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             "Rules    : %d  (%s)" % (len(PORT_RULES),
+                                      "applied" if PORTS["on"] else "not applied"),
+             ""]
+    if not PORT_RULES:
+        lines.append("No port rules. Add one with block(x.x.x.x, 443), "
+                     "block(*, 23), or allow(x.x.x.x, 80).")
+    else:
+        lines += port_rules_lines(names)
+    lines += ["",
+              "Allow rules are checked first; a matching allow beats any block,",
+              "and beats the gate, the forbidden area and a forward-mode close()",
+              "for that device and port. Ports are destination ports on",
+              "forwarded traffic -- the router's own ports are not covered.",
+              "Rules are keyed on MAC and persist across restarts.",
+              "",
+              "On the router: iptables -L %s -n -v   (the pkts column on a"
+              % PORT_CHAIN,
+              "block rule counts what it has dropped)"]
+    return "\n".join(lines) + "\n"
+
+
 def alert(ip, name, total, e, threshold, level, cfg, cooldown):
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     label = "%s (%s)" % (ip, name) if name else ip
@@ -4983,6 +5420,11 @@ def main():
     ap.add_argument("--forbidden-dry-run", action="store_true",
                     help="Print the forbidden-area iptables commands instead of "
                          "running them. Read the plan before you trust it.")
+    ap.add_argument("--ports-dry-run", action="store_true",
+                    help="Print the port-rule iptables commands (block(x, 443), "
+                         "allow(x, 80), ...) instead of running them. The rule "
+                         "list is still saved, so the plan you read is the one "
+                         "a real run would apply.")
     args = ap.parse_args()
 
     # Over `ssh host "cmd"` stdout is a pipe, not a terminal, so Python block-
@@ -5312,6 +5754,23 @@ def main():
             for line in zone_status_lines():
                 print("  " + line)
 
+    # Port rules go up last so their chain lands at the head of FORWARD,
+    # ahead of the gate and the forbidden area -- an allow must be judged
+    # before any drop. Re-applied from the file: a restart keeps the policy.
+    PORTS["dry_run"] = args.ports_dry_run
+    ports_load()
+    if PORT_RULES:
+        print("Port rules loaded from %s:" % PORT_RULES_FILE)
+        for line in port_rules_lines():
+            print("  " + line)
+        print("  " + ports_apply())
+        print("  remove the chain entirely with: %s" % ports_teardown())
+    if args.accept_commands:
+        print("  block(x.x.x.x, 443) / block(*, 23) / block(x.x.x.x, 6881-6889, udp) "
+              "/ allow(x.x.x.x, 80) / unblock(...) / unallow(...) / rules() -- "
+              "per-port control, keyed on MAC, allows win%s"
+              % ("  [DRY RUN]" if args.ports_dry_run else ""))
+
     meter = Meter(nets)
 
     if args.usage_report:
@@ -5427,6 +5886,11 @@ def main():
             if QUOTAS:
                 quota_check(meter, nets, cfg, args.close_mode,
                             args.close_dry_run, blocked)
+
+            # A quota close() inserts ahead of the port chain; an allow must
+            # stay in front of every drop, so put the hook back if it moved.
+            if PORT_RULES and ports_rehook():
+                print("  [ports: chain moved back to the head of FORWARD]")
 
             if args.table_every and (cycle == 1 or cycle % args.table_every == 0):
                 print("\n-- %s --" % datetime.now().strftime("%H:%M:%S"))

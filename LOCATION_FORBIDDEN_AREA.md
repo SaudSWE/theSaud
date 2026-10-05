@@ -131,7 +131,7 @@ script now covers:
 | 5 | Location by dB signal + coordinates | **met**| this change: trace + `--anchor` |
 | 6 | Authorised group vs. target         | met    | `--always-open` gate; forbidden-area exemption |
 | 7 | Device tracing                      | **met**| movement tracker + continuous trace |
-| 8 | Control: bandwidth / block / allow  | partial| `throttle()` ✓, `close()`/`open()`/gate ✓ **by IP/MAC, not port** |
+| 8 | Control: bandwidth / block / allow  | met    | `throttle()` ✓; device-level `close()`/`open()`/gate ✓; **per-port `block()`/`allow()`** ✓ — see `PORT_RULES.md` |
 | 9 | Detect malfunction / no internet    | partial| speed probe flags a dead/degraded link; connected-device detection |
 | 10| IoT sensor on/off switch            | not met| `close()`/`open()` toggles any device's connectivity, but no sensor telemetry |
 | 11| Forbidden area                      | **met**| this change |
