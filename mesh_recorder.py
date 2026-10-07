@@ -439,11 +439,13 @@ if [ "%(main)s" = 1 ]; then
   echo "## ACCT"
   a=$(cat /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null)
   if [ "$a" = 0 ]; then echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct; echo "ACCT 0 enabled"; else echo "ACCT ${a:--}"; fi
+  # restarting logd cuts dnsmasq off from syslog (seen on GL-MT3000), so
+  # dnsmasq is restarted after it -- otherwise lookups silently stop logging
   if [ "%(dns)s" = 1 ]; then
     q=$(uci -q get dhcp.@dnsmasq[0].logqueries)
     if [ "$q" != 1 ]; then uci set dhcp.@dnsmasq[0].logqueries=1; uci commit dhcp; /etc/init.d/dnsmasq restart >/dev/null 2>&1; echo "DNSLOG enabled"; else echo "DNSLOG on"; fi
     z=$(uci -q get system.@system[0].log_size)
-    if [ "${z:-0}" -lt 1024 ]; then uci set system.@system[0].log_size=1024; uci commit system; /etc/init.d/log restart >/dev/null 2>&1; echo "LOGSIZE ${z:-64} raised to 1024"; else echo "LOGSIZE $z"; fi
+    if [ "${z:-0}" -lt 1024 ]; then uci set system.@system[0].log_size=1024; uci commit system; /etc/init.d/log restart >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; echo "LOGSIZE ${z:-64} raised to 1024"; else echo "LOGSIZE $z"; fi
   fi
   w=$(ip route | awk '/^default/{print $5; exit}')
   echo "WAN ${w:--} $(cat /sys/class/net/$w/statistics/rx_bytes 2>/dev/null) $(cat /sys/class/net/$w/statistics/tx_bytes 2>/dev/null)"

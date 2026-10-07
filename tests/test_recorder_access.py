@@ -190,6 +190,14 @@ check("status lines parsed", g["dnslog"] == "enabled" and g["logsize"] == "64 ra
 check("remote script switches logqueries on",
       "logqueries=1" in mr.REMOTE and "log_size=1024" in mr.REMOTE)
 check("--no-dns leaves it alone", '"%(dns)s" = 1' in mr.REMOTE)
+check("dnsmasq restarted after the log service (keeps query logging alive)",
+      mr.REMOTE.index("/etc/init.d/log restart")
+      < mr.REMOTE.index("/etc/init.d/dnsmasq restart", mr.REMOTE.index("/etc/init.d/log restart")))
+stamp2 = _tm.strftime("%a %b %d %H:%M:%S %Y", _tm.localtime(1791382400))
+xl = ["%s daemon.info dnsmasq[1]: 7 192.168.8.135/51234 query[AAAA] m.facebook.com from 192.168.8.135" % stamp2]
+xq = [x for x in r5.log_rows("main123", {"log": xl}) if x["record_type"] == "dns_query"]
+check("GL.iNet 'extra' log format parsed", len(xq) == 1 and xq[0]["domain"] == "m.facebook.com"
+      and xq[0]["device_ip"] == "192.168.8.135")
 check("dictionary documents domain + browsing",
       any(c[0] == "domain" for c in mr.COLUMNS)
       and "Browsing history" in dict((r[0], r[1]) for r in mr.RECORD_TYPES)["dns_query"])
