@@ -1035,6 +1035,291 @@ def gated_open(ip, nets, dry_run=False, blocked=None):
     return msg
 
 
+# ----------------------------------------------------- group allow/deny lists
+#
+# ADDED. The authorised group as two text files on the gateway (SRS
+# Group.Lists), the same files group_lists.py manages:
+#
+#     allow.txt  -- device MACs permitted internet access (the gate lets them
+#                   through); everything NOT on it is held by the approval gate
+#     deny.txt   -- device MACs blocked entirely by MAC (INPUT + FORWARD drop +
+#                   wifi ban, i.e. what close() does)
+#
+# Three states follow (Model A), with a block beating an allow (BR-2):
+#
+#     on allow, not deny  -> internet          (gate RETURN)
+#     on deny             -> nothing           (blocked by MAC)
+#     on neither          -> held at the gate  (address + DNS, no internet)
+#
+# THE FILES ARE THE INTERFACE, NOT AN IMPORT
+#     StreamWatch (here) and group_lists.py share these files, not code: the
+#     admin edits them with group_lists.py or by hand, StreamWatch reads and
+#     writes the same format and enforces. One store, several readers -- the
+#     same arrangement the SRS uses for the calibration model. So this parses
+#     the file itself rather than importing, which also keeps the gateway's
+#     standard-library-only constraint (CON-1) with no cross-file dependency.
+#
+# MAC, NOT IP (Data.Identity)
+#     Lines are MACs. close(ip)/open(ip) name a device by the IP you read off
+#     the map, resolve it to its MAC once, and store the MAC. A line that
+#     cannot be resolved to a MAC is refused, never guessed.
+#
+# NEVER LOCK YOURSELF OUT
+#     The deny path reuses disconnect_device(), which already refuses the
+#     router and the SSH peer. Startup/hand-edit deny enforcement skips the
+#     SSH peer's MAC for the same reason. The gate is FORWARD-only, so an SSH
+#     session survives regardless; a deny is INPUT+FORWARD, so it must not land
+#     on the peer.
+
+GROUP = {"on": False, "allow": "/etc/streamwatch/allow.txt",
+         "deny": "/etc/streamwatch/deny.txt",
+         "granted": set(), "blocked": set(), "mtimes": {}}
+
+
+def group_file_load(path):
+    """{mac: comment} from a list file. Missing file is empty, not an error."""
+    out = {}
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                body, _, comment = line.partition("#")
+                tok = body.strip()
+                if GATE_MAC.match(tok):
+                    out[tok.lower()] = comment.strip()
+    except OSError:
+        pass
+    return out
+
+
+def group_mac_set(path):
+    return set(group_file_load(path))
+
+
+def group_file_save(path, entries):
+    """Atomic write, mode 600 -- same format group_lists.py writes."""
+    d = os.path.dirname(path) or "."
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        for mac, comment in entries.items():
+            f.write("%-17s  # %s\n" % (mac, comment) if comment else "%s\n" % mac)
+    os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def group_file_add(path, mac, label=""):
+    entries = group_file_load(path)
+    if mac in entries:
+        return False
+    entries[mac] = label
+    group_file_save(path, entries)
+    return True
+
+
+def group_file_remove(path, mac):
+    entries = group_file_load(path)
+    if mac not in entries:
+        return False
+    del entries[mac]
+    group_file_save(path, entries)
+    return True
+
+
+def _group_label(ip):
+    return "%s %s" % (ip or "-",
+                      datetime.now().strftime("set %Y-%m-%dT%H:%M:%S"))
+
+
+def _group_peer_mac():
+    peer = ssh_peer()
+    return mac_for_ip(peer) if peer else None
+
+
+def group_touch():
+    """Record the list files' mtimes, so a change WE made does not read back as
+    a hand-edit on the next reconcile."""
+    for key in ("allow", "deny"):
+        try:
+            GROUP["mtimes"][key] = os.path.getmtime(GROUP[key])
+        except OSError:
+            GROUP["mtimes"][key] = 0.0
+
+
+def group_files_changed():
+    for key in ("allow", "deny"):
+        try:
+            if os.path.getmtime(GROUP[key]) != GROUP["mtimes"].get(key):
+                return True
+        except OSError:
+            if GROUP["mtimes"].get(key):
+                return True
+    return False
+
+
+def gate_grant_mac(mac, label=""):
+    """Grant one MAC through the gate directly (no IP needed), and record it on
+    the always list so gate_is_always() agrees."""
+    if not GATE["on"]:
+        return
+    rc, _ = gate_ipt("-C", GATE_CHAIN, "-m", "mac", "--mac-source", mac,
+                     "-j", "RETURN")
+    if rc != 0:
+        gate_ipt("-I", GATE_CHAIN, "1", "-m", "mac", "--mac-source", mac,
+                 "-j", "RETURN")
+    GATE["always"][mac] = label or mac
+
+
+def gate_revoke_mac(mac):
+    if not GATE["on"]:
+        return
+    n = 0
+    while n < 50:
+        rc, _ = gate_ipt("-D", GATE_CHAIN, "-m", "mac", "--mac-source", mac,
+                         "-j", "RETURN")
+        if rc != 0:
+            break
+        n += 1
+    GATE["always"].pop(mac, None)
+
+
+def group_block_mac(mac):
+    """Block one MAC entirely -- INPUT + FORWARD drop + wifi ban -- for a deny
+    entry that may have no current IP (startup, hand-edit). The SSH peer is
+    never blocked. Honours --gate-dry-run."""
+    if mac == _group_peer_mac():
+        return "[deny SKIPPED] %s is the SSH peer -- not blocking it" % mac
+    if GATE["dry_run"]:
+        print("      [group DRY RUN] block %s: iptables -I INPUT/-I FORWARD "
+              "-m mac --mac-source %s -j DROP (+ wifi ban)" % (mac, mac))
+        return "[deny DRY RUN] %s" % mac
+    plan = [["iptables", "-I", "INPUT", "-m", "mac", "--mac-source", mac,
+             "-j", "DROP"],
+            ["iptables", "-I", "FORWARD", "-m", "mac", "--mac-source", mac,
+             "-j", "DROP"]]
+    wifi, _ = wifi_ban_plan(mac)
+    _run_plan(plan + wifi)
+    return "[deny] %s blocked" % mac
+
+
+def group_unblock_mac(mac):
+    if GATE["dry_run"]:
+        print("      [group DRY RUN] unblock %s" % mac)
+        return
+    _delete_all("INPUT", mac)
+    _delete_all("FORWARD", mac)
+    wifi, _ = wifi_ban_plan(mac, remove=True)
+    _run_plan(wifi)
+
+
+def group_deny(ip, nets, dry_run=False, blocked=None):
+    """close(ip) under group lists: fully block the device AND move it from the
+    allow list to the deny list, so the decision persists (Control.Persist)."""
+    msg = disconnect_device(ip, nets, dry_run=dry_run, blocked=blocked)
+    if dry_run or "REFUSED" in msg or "SKIPPED" in msg:
+        return msg
+    mac = (blocked or {}).get(ip) or mac_for_ip(ip)
+    if not mac:
+        return msg + "\n      [deny] no MAC known for %s -- lists not updated" % ip
+    gate_revoke_mac(mac)
+    GROUP["granted"].discard(mac)
+    group_file_remove(GROUP["allow"], mac)
+    added = group_file_add(GROUP["deny"], mac, _group_label(ip))
+    GROUP["blocked"].add(mac)
+    group_touch()
+    return msg + ("\n      deny-listed %s (%s)%s"
+                  % (ip, mac, "" if added else " (already listed)"))
+
+
+def group_allow(ip, nets, dry_run=False, blocked=None):
+    """open(ip) under group lists: unblock the device, move it from the deny
+    list to the allow list, and let it through the gate."""
+    if not dry_run and not any(in_net(ip, n) for n in nets):
+        return "[open REFUSED] %s is not on a LAN subnet" % ip
+    msg = reconnect_device(ip, nets, dry_run=dry_run, blocked=blocked)
+    if dry_run:
+        return msg
+    mac = mac_for_ip(ip) or (blocked or {}).get(ip)
+    if not mac:
+        return msg + ("\n      [allow] no MAC known for %s -- lists not updated; "
+                      "wait for the device to ask for an address" % ip)
+    group_file_remove(GROUP["deny"], mac)
+    GROUP["blocked"].discard(mac)
+    group_file_add(GROUP["allow"], mac, _group_label(ip))
+    gate_grant_mac(mac, ip)
+    GROUP["granted"].add(mac)
+    group_touch()
+    return msg + "\n      allow-listed %s (%s) -- internet now permitted" % (ip, mac)
+
+
+def group_reconcile(nets):
+    """Bring the live gate and firewall in line with the files -- the path a
+    hand edit of allow.txt / deny.txt takes effect through (Group.ListReload).
+    A block beats an allow (BR-2); the SSH peer is never denied."""
+    allow = group_mac_set(GROUP["allow"])
+    deny = group_mac_set(GROUP["deny"])
+    peer = _group_peer_mac()
+    allow_eff = allow - deny
+    deny_eff = {m for m in deny if m != peer}
+
+    changes = []
+    for m in allow_eff - GROUP["granted"]:
+        gate_grant_mac(m)
+        GROUP["granted"].add(m)
+        changes.append("grant %s" % m)
+    for m in set(GROUP["granted"]) - allow_eff:
+        gate_revoke_mac(m)
+        GROUP["granted"].discard(m)
+        changes.append("ungrant %s" % m)
+    for m in deny_eff - GROUP["blocked"]:
+        group_block_mac(m)
+        GROUP["blocked"].add(m)
+        changes.append("block %s" % m)
+    for m in set(GROUP["blocked"]) - deny_eff:
+        group_unblock_mac(m)
+        GROUP["blocked"].discard(m)
+        changes.append("unblock %s" % m)
+    group_touch()
+    if not changes:
+        return "[group] files changed, no net effect"
+    return "[group] reload: %s" % ", ".join(changes)
+
+
+def group_install(nets, cli_always):
+    """Set up the gate from allow.txt and enforce deny.txt at startup. Returns
+    report lines. The gate's own install builds the chain; this seeds it with
+    the allow list and blocks the deny list."""
+    allow = group_mac_set(GROUP["allow"])
+    deny = group_mac_set(GROUP["deny"])
+    allow_eff = allow - deny
+    lines = ["[group] allow=%s deny=%s (%d allowed, %d denied)"
+             % (GROUP["allow"], GROUP["deny"], len(allow_eff), len(deny))]
+    if not allow_eff and not cli_always and not ssh_peer():
+        lines.append("  WARNING: the allow list is empty and nothing else is "
+                     "always-open, so the gate would drop every device "
+                     "(including yours). Add your admin device to %s first; "
+                     "the gate is NOT being installed." % GROUP["allow"])
+        return lines, []
+    GROUP["granted"] = set(allow_eff)
+    peer = _group_peer_mac()
+    for m in deny:
+        if m == peer:
+            lines.append("  deny %s skipped -- it is the SSH peer" % m)
+            continue
+        group_block_mac(m)
+        GROUP["blocked"].add(m)
+    if deny:
+        lines.append("  %d device(s) on the deny list blocked by MAC"
+                     % len(GROUP["blocked"]))
+    group_touch()
+    return lines, list(allow_eff)
+
+
 # --------------------------------------------------------------- speed test
 #
 # ADDED. Measures the gateway's own internet link and mails a report.
@@ -2754,13 +3039,20 @@ def command_watcher(cfg, nets, interval, dry_run, allow_from, mode="full",
         for note in notes:
             print("  " + note)
         for ip in closes:
-            # gated_close is disconnect_device/block_ip unchanged when the
-            # gate is off; with it on, it also revokes the gate pass.
-            print("  " + gated_close(ip, nets, dry_run=dry_run,
-                                     blocked=blocked, mode=mode))
+            # Under --group-lists, close(ip) also deny-lists the device; with
+            # the plain gate it just revokes the pass; with no gate it is an
+            # unchanged disconnect_device/block_ip.
+            if GROUP["on"]:
+                print("  " + group_deny(ip, nets, dry_run=dry_run, blocked=blocked))
+            else:
+                print("  " + gated_close(ip, nets, dry_run=dry_run,
+                                         blocked=blocked, mode=mode))
         for ip in opens:
-            print("  " + gated_open(ip, nets, dry_run=dry_run,
-                                    blocked=blocked))
+            if GROUP["on"]:
+                print("  " + group_allow(ip, nets, dry_run=dry_run, blocked=blocked))
+            else:
+                print("  " + gated_open(ip, nets, dry_run=dry_run,
+                                        blocked=blocked))
         for ip, nbytes, period in extra.get("limits", []):
             print("  " + quota_set(ip, nbytes, period))
         for ip in extra.get("unlimits", []):
@@ -3087,14 +3379,24 @@ def send_email_alert(smtp_server, smtp_port, user, password, to_addr, subject, b
                 if not closes and not opens:
                     print("  [commands: no close(ip) or open(ip) in that first line]")
                 for ip in closes:
-                    print("  " + gated_close(ip, cmd_cfg["nets"],
-                                             dry_run=cmd_cfg["dry_run"],
-                                             blocked=cmd_cfg["blocked"],
-                                             mode=cmd_cfg["mode"]))
+                    if GROUP["on"]:
+                        print("  " + group_deny(ip, cmd_cfg["nets"],
+                                                dry_run=cmd_cfg["dry_run"],
+                                                blocked=cmd_cfg["blocked"]))
+                    else:
+                        print("  " + gated_close(ip, cmd_cfg["nets"],
+                                                 dry_run=cmd_cfg["dry_run"],
+                                                 blocked=cmd_cfg["blocked"],
+                                                 mode=cmd_cfg["mode"]))
                 for ip in opens:
-                    print("  " + gated_open(ip, cmd_cfg["nets"],
-                                            dry_run=cmd_cfg["dry_run"],
-                                            blocked=cmd_cfg["blocked"]))
+                    if GROUP["on"]:
+                        print("  " + group_allow(ip, cmd_cfg["nets"],
+                                                 dry_run=cmd_cfg["dry_run"],
+                                                 blocked=cmd_cfg["blocked"]))
+                    else:
+                        print("  " + gated_open(ip, cmd_cfg["nets"],
+                                                dry_run=cmd_cfg["dry_run"],
+                                                blocked=cmd_cfg["blocked"]))
 
         # Optional: take the data size named in that line as the new limit.
         # The main loop applies it -- this thread only proposes.
@@ -5258,6 +5560,23 @@ def main():
     ap.add_argument("--gate-dry-run", action="store_true",
                     help="Print the default-deny iptables commands instead of "
                          "running them. Read the plan before you trust it.")
+    ap.add_argument("--group-lists", action="store_true",
+                    help="Drive the approval gate from two MAC text files "
+                         "(SRS Group.Lists): the allow list is let through, the "
+                         "deny list is blocked entirely, everything else is "
+                         "held at the gate. close(ip) deny-lists a device, "
+                         "open(ip) allow-lists it; both persist across restart. "
+                         "Hand edits to the files are picked up live. Switches "
+                         "the LAN to default-deny, like --always-open.")
+    ap.add_argument("--allow-file", default="/etc/streamwatch/allow.txt",
+                    metavar="PATH",
+                    help="Allow list for --group-lists (default "
+                         "/etc/streamwatch/allow.txt). Managed by group_lists.py "
+                         "or by hand; one MAC per line, # for comments.")
+    ap.add_argument("--deny-file", default="/etc/streamwatch/deny.txt",
+                    metavar="PATH",
+                    help="Deny list for --group-lists (default "
+                         "/etc/streamwatch/deny.txt).")
     ap.add_argument("--speed-report", action="store_true",
                     help="Measure the gateway's internet link on a timer and "
                          "email a report. Independent of traffic alerts.")
@@ -5581,8 +5900,28 @@ def main():
         except OSError as e:
             print("Could not read --always-open-file: %s" % e, file=sys.stderr)
             return 1
-    if gate_entries:
+
+    # --group-lists seeds the gate's always-open set from allow.txt (minus
+    # anything on deny.txt) and enforces deny.txt. It must run before
+    # gate_install so the allow list is part of the chain from the first
+    # packet, with no open window.
+    group_lines = []
+    if args.group_lists:
+        GROUP["on"] = True
+        GROUP["allow"], GROUP["deny"] = args.allow_file, args.deny_file
+        group_lines, group_allow_macs = group_install(nets, gate_entries)
+        gate_entries += group_allow_macs
+
+    if gate_entries or GROUP["on"]:
         print("  " + gate_install(gate_entries, nets, dry_run=args.gate_dry_run))
+        for line in group_lines:
+            print("  " + line)
+        if GROUP["on"]:
+            # gate_install resolved the allow MACs onto GATE["always"]; keep
+            # the granted set in step with what actually installed.
+            GROUP["granted"] = set(GATE["always"])
+            print("  group lists ON: close(ip) deny-lists, open(ip) "
+                  "allow-lists; hand edits reload live")
         if not args.accept_commands:
             print("  NOTE: without --accept-commands there is no open(x.x.x.x) "
                   "channel, so nothing can be let through the gate remotely.")
@@ -5891,6 +6230,11 @@ def main():
             # stay in front of every drop, so put the hook back if it moved.
             if PORT_RULES and ports_rehook():
                 print("  [ports: chain moved back to the head of FORWARD]")
+
+            # A hand edit of allow.txt / deny.txt takes effect here, without a
+            # restart and without the email channel (Group.ListReload).
+            if GROUP["on"] and group_files_changed():
+                print("  " + group_reconcile(nets))
 
             if args.table_every and (cycle == 1 or cycle % args.table_every == 0):
                 print("\n-- %s --" % datetime.now().strftime("%H:%M:%S"))
