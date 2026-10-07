@@ -161,6 +161,7 @@ RECORD_TYPES = [
     ("sw_usage", "StreamWatch's own per-minute usage table: per device total_in / total_out / value = total bytes since StreamWatch started, signal or 'wired'; plus a summary row (value = live flows).", "every minute"),
     ("sw_quota", "StreamWatch data limit for a device: limit (value), used (total_in), period, blocked.", "on change"),
     ("sw_throttle", "StreamWatch speed limit for a device (down/up kbit in detail).", "on change"),
+    ("malfunction", "Item 9 / Detect: internet outages and missing devices, from StreamWatch on main123. category internet_down (state DOWN; timestamp = first failed check) and internet_up (state UP; duration_s = outage length; detail = down-from and restored times) -- together the outage history; device_missing (state MISSING; a device on the allow/watch list unseen for the set time; detail = last seen) and device_back (state BACK; duration_s = how long it was missing).", "as it happens"),
     ("email", "Every email StreamWatch sent (alerts, reports, replies) and every command email it received, refused or ignored as too old: category = sent, failed, received, refused or stale; email_from / email_to / email_subject; detail = first line sent, or the commands found. timestamp/date/time = when the email was handled on main123. Ordinary non-command mail is not recorded.", "as it happens"),
     ("internet_access", "When a device's internet access changed, from StreamWatch's allow/deny lists on main123: state GRANTED (on the allow list), BLOCKED (on the deny list; a block beats an allow), or HELD (on neither list -- has an address but no internet until approved). category = previous->new state, or 'initial' for the first row per device. timestamp = when the recorder saw the change; detail = the time and IP written next to the device in the list file.", "on change"),
     ("device_inventory", "StreamWatch's registry entry for a MAC: vendor, randomised, first/last seen, hostnames, IPs.", "on change"),
@@ -396,6 +397,8 @@ def write_dictionary(folder):
         "  tracker_event ARRIVED), failed SSH logins (router_log ssh_fail).",
         "* Inbound connections (flow_end direction=inbound), unusual ports/services,",
         "  sudden data spikes (device_traffic), quota hits (sw_quota).",
+        "* Outages (malfunction): when the internet went down and for how long,",
+        "  and which expected devices dropped off the network and when.",
         "* Browsing (dns_query): which sites each device visited and when --",
         "  group by device_mac and domain, count, and look at the time of day.",
         "* Every email (email): alerts and reports sent, command emails received,",
@@ -458,6 +461,8 @@ if [ "%(main)s" = 1 ]; then
   done
   echo "## EMAILS"
   tail -n 300 /root/.streamwatch_emails.log 2>/dev/null
+  echo "## HEALTH"
+  tail -n 300 /root/.streamwatch_health.log 2>/dev/null
   for f in allow deny; do
     echo "## ACL $f"
     if [ -f /etc/streamwatch/$f.txt ]; then cat /etc/streamwatch/$f.txt; else echo "__MISSING__"; fi
@@ -516,7 +521,7 @@ def band_of(freq):
 def parse_router(text):
     d = {"sys": {}, "ifaces": [], "stations": [], "log": [], "leases": [],
          "conntrack": [], "sw": {}, "ports": [], "uci": [], "acct": "", "wan": None,
-         "acl": {}, "emails": [], "dnslog": "", "logsize": ""}
+         "acl": {}, "emails": [], "health": [], "dnslog": "", "logsize": ""}
     section, cur, iface, swname, swbuf = None, None, None, None, []
     aclname = None
 
@@ -593,11 +598,11 @@ def parse_router(text):
             d["conntrack"].append(line)
         elif section == "SW":
             swbuf.append(line)
-        elif section == "EMAILS":
+        elif section in ("EMAILS", "HEALTH"):
             try:
                 e = json.loads(line)
                 if isinstance(e, dict) and "t" in e:
-                    d["emails"].append(e)
+                    d["emails" if section == "EMAILS" else "health"].append(e)
             except ValueError:
                 pass
         elif section == "ACL":
@@ -710,6 +715,7 @@ class Recorder:
         self.sw_hash = {}             # (kind, key) -> hash of last written state
         self.access = {}              # mac -> GRANTED / BLOCKED / HELD (internet_access)
         self.emails_seen = set()      # hashes of email-log lines already written
+        self.health_seen = set()      # hashes of health-log lines already written
         self.reach = {}               # router -> bool
         self.next_health = 0.0
         self.next_full = 0.0
@@ -851,6 +857,7 @@ class Recorder:
                                     detail="%s %s on main123 so every lookup by every "
                                     "device is recorded" % (what, v)))
             rows += self.email_rows(main)
+            rows += self.health_rows(main)
         return rows
 
     def health_row(self, now, name, d):
@@ -1242,6 +1249,34 @@ class Recorder:
                             access_time=m.group(1) if m else "",
                             category="initial" if prev is None else "%s->%s" % (prev, state),
                             detail=note))
+        return rows
+
+    def health_rows(self, main):
+        """malfunction rows from StreamWatch's health log, each at its own time:
+        internet_down / internet_up (with the outage length) and
+        device_missing / device_back."""
+        rows = []
+        for e in main.get("health") or []:
+            key = hashlib.md5(json.dumps(e, sort_keys=True).encode()).hexdigest()
+            if key in self.health_seen:
+                continue
+            self.health_seen.add(key)
+            try:
+                t = float(e["t"])
+            except (TypeError, ValueError):
+                continue
+            kind = e.get("kind", "")
+            dev = self.dev(ip=e.get("ip") or None, mac=e.get("mac") or None) \
+                if e.get("mac") or e.get("ip") else {}
+            if e.get("name") and dev and not dev.get("device_name"):
+                dev["device_name"] = e["name"]
+            rows.append(rec("malfunction", t, **st_fields(MAIN), **dev,
+                            category=kind,
+                            state={"internet_down": "DOWN", "internet_up": "UP",
+                                   "device_missing": "MISSING",
+                                   "device_back": "BACK"}.get(kind, ""),
+                            duration_s=e.get("duration_s", ""),
+                            detail=e.get("detail", "")))
         return rows
 
     def email_rows(self, main):

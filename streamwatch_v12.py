@@ -1358,6 +1358,249 @@ def gate_reensure():
     return True
 
 
+# ------------------------------------------------------ malfunction detect
+#
+# ADDED. Whiteboard item 9 / SRS Detect.NoInternet and Detect.NotConnected.
+#
+# NO INTERNET
+#     The speed probe only hinted at an outage ("probe failed", and only with
+#     --speed-report on). This is a dedicated check: a TCP handshake to two
+#     independent upstream targets every --detect-every seconds -- a few
+#     hundred bytes, no download. The internet counts as DOWN only after
+#     --detect-fails probes in a row reach NEITHER target, so one lost packet
+#     or one provider's hiccup is not an outage; the outage is then dated from
+#     the FIRST failed probe, not the moment it was confirmed.
+#
+#     An alert email cannot leave while the internet is down, so the DOWN
+#     event is logged and printed at once and the email is held: it goes out
+#     the moment the link is back, carrying both times and the duration
+#     (ROB-2, queued alerts delivered once the connection returns).
+#
+# DEVICE NOT CONNECTED
+#     Devices that should be present -- the allow list under --group-lists,
+#     plus any --watch-device -- are checked each round. Seen = associated to
+#     a radio, or a REACHABLE/DELAY/PROBE neighbour entry (a STALE ARP entry
+#     lingers for minutes after a device leaves, so it does not count). Absent
+#     for --missing-after seconds -> one alert; seen again -> one alert. One
+#     message per transition is Detect.Suppress by construction.
+#
+# HISTORY
+#     Every event is a JSON line in HEALTH_LOG, which the Recorder on the
+#     companion host pulls into the AI CSV as `malfunction` rows with their
+#     own date and time -- the outage history.
+
+HEALTH_LOG = "/root/.streamwatch_health.log"
+HEALTH_LOG_KEEP = 2000
+_HEALTH_LOCK = threading.Lock()
+DETECT_ANCHORS = (("1.1.1.1", 443), ("8.8.8.8", 53))
+
+
+def health_log(kind, t=None, **kw):
+    rec = {"t": round(t if t is not None else time.time(), 3), "kind": kind}
+    rec.update({k: v for k, v in kw.items() if v not in (None, "")})
+    try:
+        import json
+        with _HEALTH_LOCK:
+            with open(HEALTH_LOG, "a") as f:
+                f.write(json.dumps(rec, sort_keys=True) + "\n")
+            if os.path.getsize(HEALTH_LOG) > HEALTH_LOG_KEEP * 400:
+                with open(HEALTH_LOG) as f:
+                    keep = f.readlines()[-HEALTH_LOG_KEEP:]
+                with open(HEALTH_LOG + ".tmp", "w") as f:
+                    f.writelines(keep)
+                os.replace(HEALTH_LOG + ".tmp", HEALTH_LOG)
+    except OSError:
+        pass
+
+
+def human_dur(sec):
+    sec = int(round(sec))
+    h, rem = divmod(sec, 3600)
+    m, s_ = divmod(rem, 60)
+    if h:
+        return "%d h %d min" % (h, m)
+    if m:
+        return "%d min %d s" % (m, s_)
+    return "%d s" % s_
+
+
+def upstream_reachable(anchors=DETECT_ANCHORS, timeout=3):
+    """True if ANY anchor completes a TCP handshake."""
+    import socket
+    for host, port in anchors:
+        sk = socket.socket()
+        sk.settimeout(timeout)
+        try:
+            sk.connect((host, port))
+            return True
+        except OSError:
+            pass
+        finally:
+            try:
+                sk.close()
+            except OSError:
+                pass
+    return False
+
+
+class OutageMonitor:
+    """Decision logic only -- fed (time, reachable?) and returns events."""
+
+    def __init__(self, fail_n=3):
+        self.fail_n = max(1, fail_n)
+        self.fails = 0
+        self.first_fail = None
+        self.down_since = None
+
+    def step(self, now, ok):
+        if ok:
+            self.fails, self.first_fail = 0, None
+            if self.down_since is not None:
+                ev = {"kind": "internet_up", "t": now, "down_since": self.down_since,
+                      "duration_s": round(now - self.down_since)}
+                self.down_since = None
+                return ev
+            return None
+        self.fails += 1
+        if self.fails == 1:
+            self.first_fail = now
+        if self.down_since is None and self.fails >= self.fail_n:
+            self.down_since = self.first_fail
+            return {"kind": "internet_down", "t": self.first_fail,
+                    "confirmed_at": now}
+        return None
+
+
+class PresenceMonitor:
+    """Decision logic only -- fed (time, watched macs, present macs)."""
+
+    def __init__(self, missing_after=300):
+        self.missing_after = missing_after
+        self.last_seen = {}
+        self.missing = {}
+
+    def step(self, now, watched, present):
+        events = []
+        for mac in watched:
+            self.last_seen.setdefault(mac, now)     # new on the list: grace period
+            if mac in present:
+                if mac in self.missing:
+                    gone = self.missing.pop(mac)
+                    events.append({"kind": "device_back", "t": now, "mac": mac,
+                                   "missing_since": gone,
+                                   "duration_s": round(now - gone)})
+                self.last_seen[mac] = now
+            elif mac not in self.missing and \
+                    now - self.last_seen[mac] >= self.missing_after:
+                self.missing[mac] = self.last_seen[mac]
+                events.append({"kind": "device_missing", "t": now, "mac": mac,
+                               "last_seen": self.last_seen[mac]})
+        for mac in list(self.missing):              # removed from the watch list
+            if mac not in watched:
+                self.missing.pop(mac)
+        return events
+
+
+def present_macs():
+    """MACs on the radio now, or a live (not STALE) neighbour entry."""
+    out = set(wifi_rssi_map(ttl=0))
+    for line in run(["ip", "neigh", "show"]).splitlines():
+        p = line.split()
+        if "lladdr" in p and p[-1] in ("REACHABLE", "DELAY", "PROBE"):
+            out.add(p[p.index("lladdr") + 1].lower())
+    return out
+
+
+def _stamp(t):
+    return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _detect_mail(cfg, subject, body):
+    if not cfg:
+        return
+    try:
+        send_email_alert(cfg["server"], cfg["port"], cfg["user"], cfg["password"],
+                         cfg["to"], subject, body)
+    except Exception as e:
+        print("  [detect: email FAILED: %s]" % e)
+
+
+def outage_watcher(cfg, every, fail_n, anchors=DETECT_ANCHORS):
+    mon = OutageMonitor(fail_n)
+    while True:
+        ev = mon.step(time.time(), upstream_reachable(anchors))
+        if ev and ev["kind"] == "internet_down":
+            health_log("internet_down", t=ev["t"],
+                       detail="no answer from %s; confirmed %s" % (
+                           ", ".join("%s:%d" % a for a in anchors),
+                           _stamp(ev["confirmed_at"])))
+            print("NO INTERNET  down since %s (confirmed after %d failed checks). "
+                  "Still monitoring the LAN; the alert email goes out when the "
+                  "link is back." % (_stamp(ev["t"]), fail_n))
+        elif ev:
+            dur = human_dur(ev["duration_s"])
+            health_log("internet_up", t=ev["t"], duration_s=ev["duration_s"],
+                       detail="down from %s to %s" % (_stamp(ev["down_since"]),
+                                                      _stamp(ev["t"])))
+            print("INTERNET BACK  outage %s -> %s (%s)"
+                  % (_stamp(ev["down_since"]), _stamp(ev["t"]), dur))
+            _detect_mail(cfg, "[streamwatch] internet was DOWN for %s" % dur,
+                         "streamwatch - internet outage\n\n"
+                         "Down from : %s\nRestored  : %s\nDuration  : %s\n\n"
+                         "Upstream checks to %s all failed for that period. Local\n"
+                         "devices kept being monitored and enforced throughout.\n"
+                         % (_stamp(ev["down_since"]), _stamp(ev["t"]), dur,
+                            ", ".join("%s:%d" % a for a in anchors)))
+        time.sleep(every)
+
+
+def watched_macs():
+    macs = set(DETECT_WATCH)
+    if GROUP["on"]:
+        macs |= group_mac_set(GROUP["allow"]) - group_mac_set(GROUP["deny"])
+    return macs
+
+
+DETECT_WATCH = set()
+
+
+def presence_watcher(cfg, every, missing_after):
+    mon = PresenceMonitor(missing_after)
+    names_at, names = 0, {}
+    while True:
+        now = time.time()
+        if now - names_at > 60:
+            names, names_at = hostname_map(), now
+        for ev in mon.step(now, watched_macs(), present_macs()):
+            ip = ip_for_mac(ev["mac"]) or ""
+            label = "%s (%s)" % (names.get(ip) or ev["mac"], ip or ev["mac"])
+            if ev["kind"] == "device_missing":
+                health_log("device_missing", t=ev["t"], mac=ev["mac"], ip=ip,
+                           name=names.get(ip, ""),
+                           detail="not seen since %s" % _stamp(ev["last_seen"]))
+                print("NOT CONNECTED  %s -- not seen since %s"
+                      % (label, _stamp(ev["last_seen"])))
+                _detect_mail(cfg, "[streamwatch] device not connected: %s" % label,
+                             "streamwatch - device not connected\n\n"
+                             "Device    : %s\nMAC       : %s\nLast seen : %s\n\n"
+                             "It is on the allow/watch list but has not been on the\n"
+                             "Wi-Fi or answered on the network for %s.\n"
+                             % (label, ev["mac"], _stamp(ev["last_seen"]),
+                                human_dur(missing_after)))
+            else:
+                dur = human_dur(ev["duration_s"])
+                health_log("device_back", t=ev["t"], mac=ev["mac"], ip=ip,
+                           name=names.get(ip, ""), duration_s=ev["duration_s"],
+                           detail="missing from %s" % _stamp(ev["missing_since"]))
+                print("RECONNECTED  %s after %s" % (label, dur))
+                _detect_mail(cfg, "[streamwatch] device back: %s" % label,
+                             "streamwatch - device reconnected\n\n"
+                             "Device  : %s\nMissing : %s -> %s (%s)\n"
+                             % (label, _stamp(ev["missing_since"]),
+                                _stamp(ev["t"]), dur))
+        time.sleep(every)
+
+
 # --------------------------------------------------------------- speed test
 #
 # ADDED. Measures the gateway's own internet link and mails a report.
@@ -5684,6 +5927,22 @@ def main():
                     metavar="PATH",
                     help="Deny list for --group-lists (default "
                          "/etc/streamwatch/deny.txt).")
+    ap.add_argument("--no-detect", action="store_true",
+                    help="Turn off malfunction detection (no-internet outages and "
+                         "missing devices). On by default: a TCP check to "
+                         "1.1.1.1:443 and 8.8.8.8:53 every --detect-every s, a few "
+                         "hundred bytes each.")
+    ap.add_argument("--detect-every", type=int, default=10, metavar="SEC",
+                    help="Seconds between upstream / presence checks (default 10).")
+    ap.add_argument("--detect-fails", type=int, default=3, metavar="N",
+                    help="Failed checks in a row before the internet counts as DOWN "
+                         "(default 3, so ~30 s). The outage is dated from the first.")
+    ap.add_argument("--missing-after", type=int, default=300, metavar="SEC",
+                    help="Seconds a watched device may be unseen before a "
+                         "'not connected' alert (default 300).")
+    ap.add_argument("--watch-device", action="append", default=[], metavar="IP|MAC",
+                    help="A device that should always be present. Repeatable. The "
+                         "allow list is watched automatically under --group-lists.")
     ap.add_argument("--speed-report", action="store_true",
                     help="Measure the gateway's internet link on a timer and "
                          "email a report. Independent of traffic alerts.")
@@ -6216,6 +6475,27 @@ def main():
               "/ allow(x.x.x.x, 80) / unblock(...) / unallow(...) / rules() -- "
               "per-port control, keyed on MAC, a block overrides an allow%s"
               % ("  [DRY RUN]" if args.ports_dry_run else ""))
+
+    if not args.no_detect:
+        for w in args.watch_device:
+            w = w.strip().lower()
+            mac = w if GATE_MAC.match(w) else mac_for_ip(w)
+            if mac:
+                DETECT_WATCH.add(mac)
+            else:
+                print("  [watch-device: no MAC known for %s yet -- skipped]" % w)
+        threading.Thread(target=outage_watcher,
+                         args=(cfg, max(2, args.detect_every), args.detect_fails),
+                         daemon=True).start()
+        threading.Thread(target=presence_watcher,
+                         args=(cfg, max(2, args.detect_every), args.missing_after),
+                         daemon=True).start()
+        print("Malfunction detection ON: internet checked every %ds (DOWN after %d "
+              "misses); %d device(s) watched%s, alert after %s missing"
+              % (args.detect_every, args.detect_fails, len(watched_macs()),
+                 " + the allow list" if GROUP["on"] else "",
+                 human_dur(args.missing_after)))
+        print("  history in %s (pulled into the AI CSV by the Recorder)" % HEALTH_LOG)
 
     meter = Meter(nets)
 
