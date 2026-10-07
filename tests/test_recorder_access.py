@@ -111,5 +111,56 @@ check("every row has exactly the schema's columns",
       all(set(row) == set(mr.FIELDS) for row in
           r.access_rows(2000, mr.parse_router(dump([], ["%s" % GUEST], L))) or [{f: "" for f in mr.FIELDS}]))
 
+print("\ndate / time / access_time columns:")
+rr = mr.rec("internet_access", 1791382158, access_time="2026-10-07T16:09:49")
+check("date column = YYYY-MM-DD of timestamp", rr["date"] == rr["timestamp"][:10]
+      and len(rr["date"]) == 10)
+check("time column = HH:MM:SS of timestamp", rr["time"] == rr["timestamp"][11:19]
+      and rr["time"].count(":") == 2)
+r3 = mr.Recorder(args)
+rows = {x["device_mac"]: x for x in r3.access_rows(5, mr.parse_router(dump(
+    ["%s  # 192.168.8.135 added 2026-10-07T16:09:49" % PHONE], [], L)))}
+check("access_time filled from the list", rows[PHONE]["access_time"] == "2026-10-07T16:09:49")
+check("access_time empty for HELD", rows[GUEST]["access_time"] == "")
+
+print("\nemails from the gateway log:")
+import json as _j
+lines = [_j.dumps({"t": 1791382000.5, "dir": "sent", "from": "sw@x", "to": "admin@x",
+                   "subject": "[streamwatch] new device", "detail": "streamwatch - new device",
+                   "id": ""}),
+         _j.dumps({"t": 1791382100, "dir": "received", "from": "admin@x", "to": "sw@x",
+                   "subject": "cmd", "detail": "close ['192.168.8.135']", "id": "<a@b>"}),
+         _j.dumps({"t": 1791382200, "dir": "refused", "from": "evil@y", "to": "sw@x",
+                   "subject": "hi", "detail": "sender not on the allowed list: open", "id": "<c@d>"}),
+         "not json"]
+txt = "## SYS\nUPTIME 1\n## EMAILS\n" + "\n".join(lines) + "\n## END\n"
+dm = mr.parse_router(txt)
+check("3 valid email lines parsed, junk skipped", len(dm["emails"]) == 3)
+r4 = mr.Recorder(args)
+er = r4.email_rows(dm)
+check("one email row per email", len(er) == 3 and all(x["record_type"] == "email" for x in er))
+check("row time is the email's own time", er[0]["epoch"] == 1791382000)
+check("date/time on email rows", er[0]["date"] and er[0]["time"])
+check("categories sent/received/refused",
+      [x["category"] for x in er] == ["sent", "received", "refused"])
+check("from/to/subject columns", er[1]["email_from"] == "admin@x"
+      and er[1]["email_to"] == "sw@x" and er[1]["email_subject"] == "cmd")
+check("commands in detail", "192.168.8.135" in er[1]["detail"])
+check("same tail polled again -> no duplicates", r4.email_rows(dm) == [])
+
+print("\nmid-day schema change does not misalign the CSV:")
+W = tempfile.mkdtemp()
+day = __import__("time").strftime("%Y-%m-%d")
+old_path = os.path.join(W, "records_%s.csv" % day)
+with open(old_path, "w") as f:
+    f.write("timestamp,epoch,record_type\n2026,1,x\n")
+w = mr.Writer(W)
+w.write([mr.rec("recorder", 1, category="start")])
+w.close()
+hdr = next(csv.reader(open(old_path)))
+check("today's file restarted with the full new header", hdr == mr.FIELDS)
+check("old rows kept aside", os.path.exists(os.path.join(W, "records_%s.old1.csv" % day))
+      or os.path.exists(os.path.join(W, "records_%s.old1.csv.gz" % day)))
+
 print("\n%d passed, %d failed" % (PASS[0], FAIL[0]))
 sys.exit(1 if FAIL[0] else 0)

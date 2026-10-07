@@ -2974,7 +2974,22 @@ def fetch_commands(user, password, imap_server, allow_from, scan=20, seen=None,
             if not (c or o or lim or unlim or thr or unthr or devq or brw
                     or loc or zoneq or fbd or unfbd or prt or rulesq or cal):
                 continue
+            found = []
+            for label, hits in (("close", c), ("open", o), ("limit", lim),
+                                ("unlimit", unlim), ("throttle", thr),
+                                ("unthrottle", unthr), ("browsing", brw),
+                                ("locate", loc), ("forbid", fbd), ("port", prt),
+                                ("calibrate", cal)):
+                if hits:
+                    found.append("%s %s" % (label, hits))
+            for label, flag in (("devices()", devq), ("zones()", zoneq),
+                                ("unforbid()", unfbd), ("rules()", rulesq)):
+                if flag:
+                    found.append(label)
+            cmd_text = "; ".join(found)
             if not any(a.lower() in sender.lower() for a in allow_from):
+                email_log("refused", sender, user, subject,
+                          "sender not on the allowed list: " + cmd_text, mid)
                 notes.append("[command REFUSED] command from %s is not on the "
                              "allowed-sender list" % sender)
                 continue
@@ -2985,10 +3000,13 @@ def fetch_commands(user, password, imap_server, allow_from, scan=20, seen=None,
             except Exception:
                 age = 0
             if age > window:
+                email_log("stale", sender, user, subject,
+                          "%d min old, not acted on: %s" % (age // 60, cmd_text), mid)
                 notes.append("[commands: ignoring a command %d min old (limit %d)]"
                              % (age // 60, window // 60))
                 continue
 
+            email_log("received", sender, user, subject, cmd_text, mid)
             closes.extend(x for x in c if x not in closes)
             opens.extend(x for x in o if x not in opens)
             limits.extend(x for x in lim if x not in limits)
@@ -3332,6 +3350,43 @@ class _NotYet(Exception):
     """Internal: the awaited message has not been delivered yet."""
 
 
+# Every email StreamWatch sends, and every command email it receives, acts on
+# or refuses, is appended to EMAIL_LOG as one JSON line, so the Recorder on the
+# companion host can put it in the AI CSV with its date and time. Content is
+# kept to the subject plus a first line / the commands found (PRV-4: no
+# message content); ordinary non-command mail in the inbox is not logged.
+EMAIL_LOG = "/root/.streamwatch_emails.log"
+EMAIL_LOG_KEEP = 2000
+_EMAIL_LOG_LOCK = threading.Lock()
+
+
+def email_log(direction, frm, to, subject, detail="", ident=""):
+    """direction: sent | failed | received | refused | stale."""
+    rec = {"t": round(time.time(), 3), "dir": direction, "from": frm or "",
+           "to": to or "", "subject": (subject or "")[:200],
+           "detail": (detail or "")[:300], "id": ident or ""}
+    try:
+        import json
+        with _EMAIL_LOG_LOCK:
+            with open(EMAIL_LOG, "a") as f:
+                f.write(json.dumps(rec, sort_keys=True) + "\n")
+            if os.path.getsize(EMAIL_LOG) > EMAIL_LOG_KEEP * 600:
+                with open(EMAIL_LOG) as f:
+                    keep = f.readlines()[-EMAIL_LOG_KEEP:]
+                with open(EMAIL_LOG + ".tmp", "w") as f:
+                    f.writelines(keep)
+                os.replace(EMAIL_LOG + ".tmp", EMAIL_LOG)
+    except OSError:
+        pass
+
+
+def _first_line(text):
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
 def send_email_alert(smtp_server, smtp_port, user, password, to_addr, subject, body,
                      include_latest=False, imap_server="imap.gmail.com",
                      latest_wait=20, state=None, cmd_cfg=None):
@@ -3354,10 +3409,15 @@ def send_email_alert(smtp_server, smtp_port, user, password, to_addr, subject, b
             filename, payload = attachment
             msg.add_attachment(payload.encode("utf-8"), maintype="text",
                                subtype="plain", filename=filename)
-        with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as s:
-            s.starttls()
-            s.login(user, password)
-            s.send_message(msg)
+        try:
+            with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as s:
+                s.starttls()
+                s.login(user, password)
+                s.send_message(msg)
+        except Exception as e:
+            email_log("failed", user, to_addr, subj, "%s | %s" % (e, _first_line(text)))
+            raise
+        email_log("sent", user, to_addr, subj, _first_line(text))
 
     def _send():
         try:

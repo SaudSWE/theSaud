@@ -92,6 +92,8 @@ OUT_DIR = os.path.join(HOME, "mesh_records")
 
 COLUMNS = [
     ("timestamp", "Local date-time of the observation, ISO 8601 with UTC offset (Riyadh = +03:00).", ""),
+    ("date", "Local date of the observation, YYYY-MM-DD (same moment as timestamp).", ""),
+    ("time", "Local time of the observation, HH:MM:SS, 24-hour, Riyadh time.", ""),
     ("epoch", "Same moment as Unix seconds (for sorting / maths).", "s"),
     ("record_type", "What kind of row this is -- see the record types table.", ""),
     ("category", "Sub-type: event name, log category, service, status (depends on record_type).", ""),
@@ -133,6 +135,10 @@ COLUMNS = [
     ("link_state", "Mesh link state (ESTAB = working), TCP state, lease state.", ""),
     ("value", "Generic number whose meaning is in 'unit' (latency, load, uptime, limit, ...).", ""),
     ("unit", "Unit of 'value'.", ""),
+    ("access_time", "internet_access: when the device's access was set on the gateway (time written next to it in the allow/deny list), ISO 8601; empty for HELD.", ""),
+    ("email_from", "email: sender address.", ""),
+    ("email_to", "email: recipient address.", ""),
+    ("email_subject", "email: subject line.", ""),
     ("detail", "Free text: original event / log message, JSON for complex state.", ""),
 ]
 FIELDS = [c[0] for c in COLUMNS]
@@ -154,6 +160,7 @@ RECORD_TYPES = [
     ("sw_usage", "StreamWatch's own per-minute usage table: per device total_in / total_out / value = total bytes since StreamWatch started, signal or 'wired'; plus a summary row (value = live flows).", "every minute"),
     ("sw_quota", "StreamWatch data limit for a device: limit (value), used (total_in), period, blocked.", "on change"),
     ("sw_throttle", "StreamWatch speed limit for a device (down/up kbit in detail).", "on change"),
+    ("email", "Every email StreamWatch sent (alerts, reports, replies) and every command email it received, refused or ignored as too old: category = sent, failed, received, refused or stale; email_from / email_to / email_subject; detail = first line sent, or the commands found. timestamp/date/time = when the email was handled on main123. Ordinary non-command mail is not recorded.", "as it happens"),
     ("internet_access", "When a device's internet access changed, from StreamWatch's allow/deny lists on main123: state GRANTED (on the allow list), BLOCKED (on the deny list; a block beats an allow), or HELD (on neither list -- has an address but no internet until approved). category = previous->new state, or 'initial' for the first row per device. timestamp = when the recorder saw the change; detail = the time and IP written next to the device in the list file.", "on change"),
     ("device_inventory", "StreamWatch's registry entry for a MAC: vendor, randomised, first/last seen, hostnames, IPs.", "on change"),
     ("open_port", "A listening port on a station (proto, local IP:port).", "hourly"),
@@ -214,6 +221,8 @@ def rec(record_type, epoch, **kw):
     r["record_type"] = record_type
     r["epoch"] = int(epoch)
     r["timestamp"] = iso(epoch)
+    r["date"] = r["timestamp"][:10]
+    r["time"] = r["timestamp"][11:19]
     for k, v in kw.items():
         if k not in r:
             raise KeyError(k)
@@ -288,6 +297,17 @@ class Writer:
             self.f.close()
         path = os.path.join(self.folder, "records_%s.csv" % day)
         new = not os.path.exists(path) or os.path.getsize(path) == 0
+        if not new:
+            with open(path, newline="", encoding="utf-8") as fh:
+                header = next(csv.reader(fh), [])
+            if header != FIELDS:
+                # schema changed mid-day: keep the old rows under their own
+                # header rather than appending rows that no longer line up
+                n = 1
+                while os.path.exists(path[:-4] + ".old%d.csv" % n):
+                    n += 1
+                os.rename(path, path[:-4] + ".old%d.csv" % n)
+                new = True
         self.f = open(path, "a", newline="", encoding="utf-8")
         self.w = csv.DictWriter(self.f, fieldnames=FIELDS, extrasaction="ignore")
         if new:
@@ -375,6 +395,8 @@ def write_dictionary(folder):
         "  tracker_event ARRIVED), failed SSH logins (router_log ssh_fail).",
         "* Inbound connections (flow_end direction=inbound), unusual ports/services,",
         "  sudden data spikes (device_traffic), quota hits (sw_quota).",
+        "* Every email (email): alerts and reports sent, command emails received,",
+        "  forged/unknown senders refused, stale commands ignored -- with date/time.",
         "* Who had internet and when (internet_access): when each device was",
         "  granted, held or blocked, and how long it waited before approval.",
         "* Weak or failing mesh links (mesh_link rssi_dbm, link_state), stations",
@@ -423,6 +445,8 @@ if [ "%(main)s" = 1 ]; then
     cat /root/.streamwatch_$f.json 2>/dev/null
     echo
   done
+  echo "## EMAILS"
+  tail -n 300 /root/.streamwatch_emails.log 2>/dev/null
   for f in allow deny; do
     echo "## ACL $f"
     if [ -f /etc/streamwatch/$f.txt ]; then cat /etc/streamwatch/$f.txt; else echo "__MISSING__"; fi
@@ -453,6 +477,7 @@ def fetch(name, full, loglines, timeout=25):
     return out if "## END" in out else None
 
 
+ACCESS_TIME = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})")
 ACL_MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 NUM = r"(-?\d+(?:\.\d+)?)"
 STA_FIELDS = [
@@ -479,7 +504,7 @@ def band_of(freq):
 def parse_router(text):
     d = {"sys": {}, "ifaces": [], "stations": [], "log": [], "leases": [],
          "conntrack": [], "sw": {}, "ports": [], "uci": [], "acct": "", "wan": None,
-         "acl": {}}
+         "acl": {}, "emails": []}
     section, cur, iface, swname, swbuf = None, None, None, None, []
     aclname = None
 
@@ -552,6 +577,13 @@ def parse_router(text):
             d["conntrack"].append(line)
         elif section == "SW":
             swbuf.append(line)
+        elif section == "EMAILS":
+            try:
+                e = json.loads(line)
+                if isinstance(e, dict) and "t" in e:
+                    d["emails"].append(e)
+            except ValueError:
+                pass
         elif section == "ACL":
             if line.strip() == "__MISSING__":
                 d["acl"][aclname] = None          # no list file on the gateway
@@ -661,6 +693,7 @@ class Recorder:
         self.leases = {}              # mac -> ip
         self.sw_hash = {}             # (kind, key) -> hash of last written state
         self.access = {}              # mac -> GRANTED / BLOCKED / HELD (internet_access)
+        self.emails_seen = set()      # hashes of email-log lines already written
         self.reach = {}               # router -> bool
         self.next_health = 0.0
         self.next_full = 0.0
@@ -795,6 +828,7 @@ class Recorder:
             rows += self.conntrack_rows(now, main)
             rows += self.sw_rows(now, main)
             rows += self.access_rows(now, main)
+            rows += self.email_rows(main)
         return rows
 
     def health_row(self, now, name, d):
@@ -1175,10 +1209,34 @@ class Recorder:
             if prev == state:
                 continue
             self.access[mac] = state
+            m = ACCESS_TIME.search(note or "")
             rows.append(rec("internet_access", now, **st_fields(MAIN), **self.dev(mac=mac),
                             state=state,
+                            access_time=m.group(1) if m else "",
                             category="initial" if prev is None else "%s->%s" % (prev, state),
                             detail=note))
+        return rows
+
+    def email_rows(self, main):
+        """One row per email in StreamWatch's email log, at the email's own
+        time. The gateway keeps a rolling tail, so lines already written are
+        remembered by hash and skipped."""
+        rows = []
+        for e in main.get("emails") or []:
+            key = hashlib.md5(json.dumps(e, sort_keys=True).encode()).hexdigest()
+            if key in self.emails_seen:
+                continue
+            self.emails_seen.add(key)
+            try:
+                t = float(e["t"])
+            except (TypeError, ValueError):
+                continue
+            rows.append(rec("email", t, **st_fields(MAIN),
+                            category=e.get("dir", ""),
+                            email_from=e.get("from", ""),
+                            email_to=e.get("to", ""),
+                            email_subject=e.get("subject", ""),
+                            detail=e.get("detail", "")))
         return rows
 
     # -------------------------------------------------------------- pi + config
