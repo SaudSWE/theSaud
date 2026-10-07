@@ -25,8 +25,8 @@ What it records (one unified CSV schema, one row per observation)
   internet_latency  StreamWatch's latency probe (ms)
   router_log        router syslog: Wi-Fi joins/leaves, DHCP, logins (failed
                     logins flagged), StreamWatch alerts/commands, kernel/system
-  dns_query         domain lookups per device (only if dnsmasq query logging
-                    is on -- StreamWatch can switch it on)
+  dns_query         browsing history: every site address each device looks up
+                    (dnsmasq query logging is switched on by the recorder)
   dhcp_lease        IP address handed to a device (new / changed)
   sw_quota / sw_throttle / device_inventory
                     StreamWatch limits, blocks, throttles, and its registry of
@@ -135,6 +135,7 @@ COLUMNS = [
     ("link_state", "Mesh link state (ESTAB = working), TCP state, lease state.", ""),
     ("value", "Generic number whose meaning is in 'unit' (latency, load, uptime, limit, ...).", ""),
     ("unit", "Unit of 'value'.", ""),
+    ("domain", "dns_query: the domain name (site address) the device looked up, e.g. www.youtube.com. Name only -- never the page path or content (PRV-4).", ""),
     ("access_time", "internet_access: when the device's access was set on the gateway (time written next to it in the allow/deny list), ISO 8601; empty for HELD.", ""),
     ("email_from", "email: sender address.", ""),
     ("email_to", "email: recipient address.", ""),
@@ -155,7 +156,7 @@ RECORD_TYPES = [
     ("router_health", "Station health: uptime, load (value), free memory, temperature, clients; 'unreachable' when SSH fails; WAN bytes/rates on main123.", "every health interval (60 s)"),
     ("internet_latency", "Latency to the internet measured by StreamWatch (value, ms).", "as logged (about every 5 s)"),
     ("router_log", "Router syslog line, categorised: wifi, dhcp, ssh, ssh_fail, streamwatch, kernel, network, system.", "as logged"),
-    ("dns_query", "A device looked up a domain (detail). Only if dnsmasq query logging is on.", "as logged"),
+    ("dns_query", "Browsing history: a device looked up a site address. One row per lookup, for every device that uses the router for DNS: device_ip/mac/name, domain, category = record type asked (A = IPv4, AAAA = IPv6, HTTPS = service info), date/time of the lookup. The recorder switches dnsmasq query logging on and enlarges the router log buffer itself, so no lookup is missed between samples. A device using encrypted DNS (DoH/DoT) to an outside server does not appear.", "as logged"),
     ("dhcp_lease", "A device got / changed an IP lease.", "on change"),
     ("sw_usage", "StreamWatch's own per-minute usage table: per device total_in / total_out / value = total bytes since StreamWatch started, signal or 'wired'; plus a summary row (value = live flows).", "every minute"),
     ("sw_quota", "StreamWatch data limit for a device: limit (value), used (total_in), period, blocked.", "on change"),
@@ -395,6 +396,8 @@ def write_dictionary(folder):
         "  tracker_event ARRIVED), failed SSH logins (router_log ssh_fail).",
         "* Inbound connections (flow_end direction=inbound), unusual ports/services,",
         "  sudden data spikes (device_traffic), quota hits (sw_quota).",
+        "* Browsing (dns_query): which sites each device visited and when --",
+        "  group by device_mac and domain, count, and look at the time of day.",
         "* Every email (email): alerts and reports sent, command emails received,",
         "  forged/unknown senders refused, stale commands ignored -- with date/time.",
         "* Who had internet and when (internet_access): when each device was",
@@ -436,6 +439,12 @@ if [ "%(main)s" = 1 ]; then
   echo "## ACCT"
   a=$(cat /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null)
   if [ "$a" = 0 ]; then echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct; echo "ACCT 0 enabled"; else echo "ACCT ${a:--}"; fi
+  if [ "%(dns)s" = 1 ]; then
+    q=$(uci -q get dhcp.@dnsmasq[0].logqueries)
+    if [ "$q" != 1 ]; then uci set dhcp.@dnsmasq[0].logqueries=1; uci commit dhcp; /etc/init.d/dnsmasq restart >/dev/null 2>&1; echo "DNSLOG enabled"; else echo "DNSLOG on"; fi
+    z=$(uci -q get system.@system[0].log_size)
+    if [ "${z:-0}" -lt 1024 ]; then uci set system.@system[0].log_size=1024; uci commit system; /etc/init.d/log restart >/dev/null 2>&1; echo "LOGSIZE ${z:-64} raised to 1024"; else echo "LOGSIZE $z"; fi
+  fi
   w=$(ip route | awk '/^default/{print $5; exit}')
   echo "WAN ${w:--} $(cat /sys/class/net/$w/statistics/rx_bytes 2>/dev/null) $(cat /sys/class/net/$w/statistics/tx_bytes 2>/dev/null)"
   echo "## CONNTRACK"
@@ -462,10 +471,11 @@ echo "## END"
 """
 
 
-def fetch(name, full, loglines, timeout=25):
+def fetch(name, full, loglines, timeout=25, dns=True):
     ip = ROUTERS[name][0]
     script = REMOTE % {"main": 1 if name == MAIN else 0,
-                       "full": 1 if full else 0, "loglines": loglines}
+                       "full": 1 if full else 0, "loglines": loglines,
+                       "dns": 1 if dns else 0}
     try:
         p = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
                             "root@" + ip, "sh -s"], input=script.encode(),
@@ -504,7 +514,7 @@ def band_of(freq):
 def parse_router(text):
     d = {"sys": {}, "ifaces": [], "stations": [], "log": [], "leases": [],
          "conntrack": [], "sw": {}, "ports": [], "uci": [], "acct": "", "wan": None,
-         "acl": {}, "emails": []}
+         "acl": {}, "emails": [], "dnslog": "", "logsize": ""}
     section, cur, iface, swname, swbuf = None, None, None, None, []
     aclname = None
 
@@ -566,6 +576,10 @@ def parse_router(text):
         elif section == "ACCT":
             if line.startswith("ACCT"):
                 d["acct"] = line[5:].strip()
+            elif line.startswith("DNSLOG"):
+                d["dnslog"] = line[7:].strip()
+            elif line.startswith("LOGSIZE"):
+                d["logsize"] = line[8:].strip()
             elif line.startswith("WAN"):
                 p = line.split()
                 if len(p) >= 4:
@@ -828,6 +842,12 @@ class Recorder:
             rows += self.conntrack_rows(now, main)
             rows += self.sw_rows(now, main)
             rows += self.access_rows(now, main)
+            for what, key in (("dns query logging", "dnslog"), ("router log buffer", "logsize")):
+                v = main.get(key) or ""
+                if "enabled" in v or "raised" in v:
+                    rows.append(rec("recorder", now, **st_fields(MAIN), category=what,
+                                    detail="%s %s on main123 so every lookup by every "
+                                    "device is recorded" % (what, v)))
             rows += self.email_rows(main)
         return rows
 
@@ -858,6 +878,10 @@ class Recorder:
             detail.append("wan %s" % w)
             if d.get("acct"):
                 detail.append("byte counting %s" % d["acct"])
+            if d.get("dnslog"):
+                detail.append("dns query logging %s" % d["dnslog"])
+            if d.get("logsize"):
+                detail.append("log buffer %s KB" % d["logsize"])
         return rec("router_health", now, **st_fields(name), category="ok",
                    value=load[0] if load else "", unit="load1",
                    duration_s=int(float(s.get("UPTIME", "0") or 0)),
@@ -991,7 +1015,8 @@ class Recorder:
                 if self.args.no_dns:
                     return None
                 return rec("dns_query", t, **st, category=q.group(1),
-                           **self.dev(ip=q.group(3)), detail=q.group(2))
+                           **self.dev(ip=q.group(3)), domain=q.group(2).lower(),
+                           detail=q.group(2))
             if re.search(r"^(reply|forwarded|cached|config|/)", msg):
                 return None            # the other half of each lookup: noise
             return rec("router_log", t, **st, category="dns", state=level, detail=msg)
@@ -1333,7 +1358,7 @@ class Recorder:
                 results = {}
 
                 def work(n):
-                    raw = fetch(n, do_full, a.log_lines)
+                    raw = fetch(n, do_full, a.log_lines, dns=not a.no_dns)
                     results[n] = parse_router(raw) if raw else None
 
                 threads = [threading.Thread(target=work, args=(n,)) for n in ROUTERS]
@@ -1563,8 +1588,9 @@ def main():
                     help="seconds between health / mesh-link rows (default 60)")
     ap.add_argument("--flow-update", type=float, default=600.0,
                     help="report long connections every N s (default 600)")
-    ap.add_argument("--log-lines", type=int, default=1000,
-                    help="router log lines read per sample (default 1000)")
+    ap.add_argument("--log-lines", type=int, default=4000,
+                    help="router log lines read per sample (default 4000; DNS "
+                         "query logging writes several lines per lookup)")
     ap.add_argument("--log-backfill", type=float, default=600.0,
                     help="at start, include router log lines from the last N s")
     ap.add_argument("--lan-prefix", default="192.168.8.",

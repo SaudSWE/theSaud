@@ -162,5 +162,37 @@ check("today's file restarted with the full new header", hdr == mr.FIELDS)
 check("old rows kept aside", os.path.exists(os.path.join(W, "records_%s.old1.csv" % day))
       or os.path.exists(os.path.join(W, "records_%s.old1.csv.gz" % day)))
 
+print("\nbrowsing history (dns_query):")
+import time as _tm
+stamp = _tm.strftime("%a %b %d %H:%M:%S %Y", _tm.localtime(1791382300))
+r5 = mr.Recorder(types.SimpleNamespace(out=TMP, lan_prefix="192.168.8.", no_dns=False,
+                                       log_backfill=10 ** 10))
+r5.learn(PHONE, "192.168.8.135", "iPhone")
+log = ["%s daemon.info dnsmasq[1234]: query[A] www.YouTube.com from 192.168.8.135" % stamp,
+       "%s daemon.info dnsmasq[1234]: forwarded www.youtube.com to 1.1.1.1" % stamp,
+       "%s daemon.info dnsmasq[1234]: reply www.youtube.com is 142.250.1.1" % stamp,
+       "%s daemon.info dnsmasq[1234]: query[HTTPS] api.example.org from 192.168.8.140" % stamp]
+dr = r5.log_rows("main123", {"log": log})
+q = [x for x in dr if x["record_type"] == "dns_query"]
+check("one row per lookup (reply/forwarded noise dropped)", len(q) == 2)
+check("domain column, lower-cased", q[0]["domain"] == "www.youtube.com")
+check("device joined: ip, mac, name", q[0]["device_ip"] == "192.168.8.135"
+      and q[0]["device_mac"] == PHONE and q[0]["device_name"] == "iPhone")
+check("query type in category", [x["category"] for x in q] == ["A", "HTTPS"])
+check("date/time of the lookup", q[0]["epoch"] == 1791382300 and q[0]["date"] and q[0]["time"])
+check("other devices recorded too", q[1]["device_ip"] == "192.168.8.140")
+check("same log polled again -> no duplicates", r5.log_rows("main123", {"log": log}) == [])
+
+print("\ngateway switches query logging on:")
+g = mr.parse_router("## SYS\nUPTIME 1\n## ACCT\nACCT 1\nDNSLOG enabled\n"
+                    "LOGSIZE 64 raised to 1024\n## END\n")
+check("status lines parsed", g["dnslog"] == "enabled" and g["logsize"] == "64 raised to 1024")
+check("remote script switches logqueries on",
+      "logqueries=1" in mr.REMOTE and "log_size=1024" in mr.REMOTE)
+check("--no-dns leaves it alone", '"%(dns)s" = 1' in mr.REMOTE)
+check("dictionary documents domain + browsing",
+      any(c[0] == "domain" for c in mr.COLUMNS)
+      and "Browsing history" in dict((r[0], r[1]) for r in mr.RECORD_TYPES)["dns_query"])
+
 print("\n%d passed, %d failed" % (PASS[0], FAIL[0]))
 sys.exit(1 if FAIL[0] else 0)
