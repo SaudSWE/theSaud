@@ -190,5 +190,51 @@ write(DENY, ["aa:bb:cc:dd:ee:09"])
 sw.group_reconcile(NETS)
 check("peer not hard-blocked", "aa:bb:cc:dd:ee:09" not in HARD)
 
+print("\ngate_reensure rebuilds the chain after a firewall flush:")
+# fake iptables: a chain store + FORWARD hook list, driven by gate_ipt/run
+CHAIN = []        # SW_GATE rules (strings after the chain name)
+HOOK = set()      # ifaces with a FORWARD -> SW_GATE jump
+
+
+def fake_gate_ipt(*a):
+    a = list(a)
+    op = a[0]
+    if op == "-N":
+        return (0, "")
+    if op == "-F" and a[1] == sw.GATE_CHAIN:
+        CHAIN.clear(); return (0, "")
+    if op == "-A" and a[1] == sw.GATE_CHAIN:
+        CHAIN.append(" ".join(a[2:])); return (0, "")
+    if op == "-C" and a[1] == "FORWARD":
+        return (0, "") if a[a.index("-i") + 1] in HOOK else (1, "no")
+    if op == "-I" and a[1] == "FORWARD":
+        HOOK.add(a[a.index("-i") + 1]); return (0, "")
+    return (0, "")
+
+
+def fake_run(cmd, timeout=5):
+    if cmd[:3] == ["iptables", "-S", sw.GATE_CHAIN]:
+        return "-N SW_GATE\n" + "".join("-A SW_GATE %s\n" % r for r in CHAIN)
+    return ""
+
+
+sw.gate_ipt = fake_gate_ipt
+sw.run = fake_run
+sw.GATE.update({"on": True, "dry_run": False, "ifaces": ["br-lan"],
+                "always": {"aa:bb:cc:dd:ee:50": "x"}})
+sw.GROUP["on"] = False
+# install once
+HOOK.add("br-lan"); CHAIN[:] = ["-m mac --mac-source aa:bb:cc:dd:ee:50 -j RETURN",
+                                "-j DROP"]
+check("no-op when chain is intact", sw.gate_reensure() is False)
+# simulate a firewall flush: chain and hook gone
+CHAIN.clear(); HOOK.clear()
+check("detects flush and rebuilds", sw.gate_reensure() is True)
+check("RETURN for the allowed mac restored",
+      any("aa:bb:cc:dd:ee:50" in r and "RETURN" in r for r in CHAIN))
+check("catch-all DROP restored", any(r == "-j DROP" for r in CHAIN))
+check("FORWARD hook restored", "br-lan" in HOOK)
+check("no-op again once healed", sw.gate_reensure() is False)
+
 print("\n%d passed, %d failed" % (PASS[0], FAIL[0]))
 sys.exit(1 if FAIL[0] else 0)

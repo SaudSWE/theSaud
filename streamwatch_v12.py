@@ -1320,6 +1320,44 @@ def group_install(nets, cli_always):
     return lines, list(allow_eff)
 
 
+def gate_reensure():
+    """Re-apply the gate if something flushed it. OpenWrt rebuilds the whole
+    firewall on `/etc/init.d/firewall reload` (and on many LuCI changes), which
+    drops SW_GATE while StreamWatch keeps running -- default-deny would silently
+    become default-ALLOW. Each poll checks the chain is still there and hooked,
+    and rebuilds it from GATE["always"] (and re-applies the deny blocks) if not.
+
+    Returns True if it had to re-apply. Never runs under --gate-dry-run (nothing
+    was ever applied to restore)."""
+    if not GATE["on"] or GATE["dry_run"] or not GATE["ifaces"]:
+        return False
+    chain = run(["iptables", "-S", GATE_CHAIN])
+    chain_ok = bool(chain.strip()) and "-j DROP" in chain
+    hooked_ok = True
+    for iface in GATE["ifaces"]:
+        rc, _ = gate_ipt("-C", "FORWARD", "-i", iface, "-j", GATE_CHAIN)
+        if rc != 0:
+            hooked_ok = False
+            break
+    if chain_ok and hooked_ok:
+        return False
+
+    gate_ipt("-N", GATE_CHAIN)
+    gate_ipt("-F", GATE_CHAIN)
+    for mac in GATE["always"]:
+        gate_ipt("-A", GATE_CHAIN, "-m", "mac", "--mac-source", mac,
+                 "-j", "RETURN")
+    gate_ipt("-A", GATE_CHAIN, "-j", "DROP")
+    for iface in GATE["ifaces"]:
+        rc, _ = gate_ipt("-C", "FORWARD", "-i", iface, "-j", GATE_CHAIN)
+        if rc != 0:
+            gate_ipt("-I", "FORWARD", "1", "-i", iface, "-j", GATE_CHAIN)
+    if GROUP["on"]:
+        for mac in list(GROUP["blocked"]):
+            group_block_mac(mac)
+    return True
+
+
 # --------------------------------------------------------------- speed test
 #
 # ADDED. Measures the gateway's own internet link and mails a report.
@@ -6235,6 +6273,11 @@ def main():
             # restart and without the email channel (Group.ListReload).
             if GROUP["on"] and group_files_changed():
                 print("  " + group_reconcile(nets))
+
+            # If a firewall reload flushed the gate, put it back -- default-deny
+            # must not silently lapse into default-allow while we run.
+            if GATE["on"] and gate_reensure():
+                print("  [gate] re-applied after a firewall flush")
 
             if args.table_every and (cycle == 1 or cycle % args.table_every == 0):
                 print("\n-- %s --" % datetime.now().strftime("%H:%M:%S"))
