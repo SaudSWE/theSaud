@@ -37,13 +37,14 @@ MAC.
 * **Keyed on MAC.** A device that gets a new DHCP lease is still covered.
 * **Forwarded traffic only.** Ports on the router itself (its SSH, its web UI)
   are not touched.
-* **Allows win.** The chain is `allow` rules first (ACCEPT), then `block` rules
-  (DROP). An allow is judged before the gate, the forbidden area, a
-  forward-mode `close()` and every block, for that device and port. It cannot
-  help a device that a full-mode `close()` has deauthenticated — there is no
-  link for any port to travel over. The tool tells you when a block you add
-  overlaps an allow, and when a device the forbidden area cuts still has an
-  allow hole.
+* **A block overrides an allow (`Control.Precedence`, BR-2).** The chain is
+  `block` rules first (DROP), then `allow` rules (ACCEPT): where an allow and a
+  block match the same device and port, the block wins. An allow that no block
+  contradicts still ACCEPTs, and because the chain sits at the head of FORWARD
+  it also passes the gate and forbidden area for that one port. It cannot help
+  a device that a full-mode `close()` has deauthenticated — there is no link
+  for any port to travel over. The tool warns you when a block and an allow you
+  add overlap, in either direction.
 * **Persisted.** Rules live in `/root/.streamwatch_ports.json` and are
   re-applied at startup. The live chain is rebuilt from that list on every
   change, so the two cannot drift apart.
@@ -61,7 +62,7 @@ BLOCK  * (all devices)                  tcp+udp 23         added 2026-10-05 12:0
 BLOCK  192.168.8.50 (phone)             tcp 443            added 2026-10-05 12:04
 BLOCK  192.168.8.60 (laptop)            udp 6881-6889      added 2026-10-05 12:06
 
-Allow rules are checked first; a matching allow beats any block, ...
+Block rules are applied first; where an allow and a block match the same ...
 ```
 
 ---

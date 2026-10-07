@@ -5093,26 +5093,25 @@ def unforbid_runtime():
 # but not port 443" -- that is what these rules add. One chain, at the head
 # of FORWARD:
 #
-#     SW_PORTS:  ACCEPT <mac> dport 80           <- allow(x.x.x.x, 80)
-#                ACCEPT       dport 53           <- allow(*, 53)
-#                DROP   <mac> dport 443          <- block(x.x.x.x, 443)
+#     SW_PORTS:  DROP   <mac> dport 443          <- block(x.x.x.x, 443)
 #                DROP         dport 23           <- block(*, 23)
+#                ACCEPT <mac> dport 80           <- allow(x.x.x.x, 80)
+#                ACCEPT       dport 53           <- allow(*, 53)
 #                (fall through: no rule here applies to this packet)
 #
-# ALLOWS FIRST, AND THEY ACCEPT
-#     An allow is the hole you punch for a device that is otherwise shut: a
-#     gated (unknown) device that may reach port 80 and nothing else, a
-#     device the forbidden area cut that must keep its VoIP port. That only
-#     works if the allow is judged before the drop, so the chain sits at the
-#     head of FORWARD -- and is put back there whenever something else
-#     (close(), the gate, the forbidden area) inserts in front of it -- and
-#     an allow ACCEPTs rather than RETURNs: RETURN would fall back into the
-#     very drops it exists to beat. The cost, stated plainly: an allow wins
-#     over everything in FORWARD for that device and port -- the gate, the
-#     forbidden area, a forward-mode close(), every block -- and is judged
-#     before OpenWrt's own forwarding rules. What it cannot beat is a
-#     full-mode close(): a deauthenticated device has no link for any port
-#     to travel over.
+# BLOCKS FIRST -- A BLOCK OVERRIDES AN ALLOW (Control.Precedence, BR-2)
+#     Where an allow and a block match the same device and port, the block
+#     wins. So the DROP rules are emitted AHEAD of the ACCEPT rules: a packet
+#     matching a block is dropped before any allow is seen. An allow still
+#     ACCEPTs traffic that no block contradicts, and because the chain sits at
+#     the head of FORWARD -- re-asserted whenever close(), the gate or the
+#     forbidden area inserts in front of it -- such an allow is also let
+#     through ahead of the gate's own drop for that one port (the hole you
+#     punch for a gated device that may reach port 80 and nothing else).
+#     ACCEPT rather than RETURN, so the allow does not fall back into the very
+#     drops it is meant to pass. What an allow cannot do is override a block of
+#     the same traffic (BR-2), nor reach a device a full-mode close() has
+#     deauthenticated.
 #
 # DESTINATION PORT, DEVICE AS SOURCE
 #     block(x, 443) means x may not reach port 443 anywhere -- the port on
@@ -5312,7 +5311,7 @@ def ports_apply():
         ports_ipt("-N", PORT_CHAIN)
         ports_ipt("-F", PORT_CHAIN)
         n, failed = 0, []
-        for action in ("allow", "block"):          # allows first: they win
+        for action in ("block", "allow"):          # blocks first: a block wins (BR-2)
             for r in PORT_RULES:
                 if r["action"] != action:
                     continue
@@ -5423,17 +5422,26 @@ def port_rule_cmd(verb, target, lo, hi, proto, nets):
         holes = [r for r in PORT_RULES
                  if r["action"] == "allow" and _ports_overlap(r, rec)]
         if holes:
-            note = ("\n      NOTE: an allow overlaps this (%s) and allows win -- "
-                    "unallow it for the block to take effect"
+            note = ("\n      NOTE: this block overrides an overlapping allow "
+                    "(%s) for this device and port -- a block always wins (BR-2)"
                     % ", ".join("%s for %s" % (port_span_text(h["lo"], h["hi"],
                                                               h["proto"]),
                                                "all devices" if h["mac"] == "*"
                                                else h["label"])
                                 for h in holes))
     else:
-        note = ("\n      an allow is an ACCEPT: it beats the gate, the forbidden "
-                "area, a forward-mode close() and every block for this device "
-                "and port. It cannot help a device close() has deauthenticated.")
+        blocks = [r for r in PORT_RULES
+                  if r["action"] == "block" and _ports_overlap(r, rec)]
+        if blocks:
+            note = ("\n      NOTE: a block overlaps this allow and a block wins "
+                    "(BR-2), so this allow has no effect where they overlap -- "
+                    "unblock to let it through")
+        else:
+            note = ("\n      an allow permits this device and port, and (as an "
+                    "ACCEPT at the head of FORWARD) lets it through the gate and "
+                    "forbidden area for that port. A block of the same traffic "
+                    "overrides it (BR-2); it cannot reach a device a full-mode "
+                    "close() has deauthenticated.")
     return ("*** %s %s for %s *** %s%s\n      undo: send %s(%s, %s%s)"
             % (action.upper(), span, who, ports_apply(), note,
                "unallow" if action == "allow" else "unblock", target,
@@ -5442,10 +5450,10 @@ def port_rule_cmd(verb, target, lo, hi, proto, nets):
 
 
 def port_rules_lines(names=None):
-    """One line per rule, allows first, the order the chain applies them."""
+    """One line per rule, blocks first, the order the chain applies them."""
     names = names or hostname_map()
     out = []
-    for action in ("allow", "block"):
+    for action in ("block", "allow"):
         for r in sorted((r for r in PORT_RULES if r["action"] == action),
                         key=lambda r: (r["mac"] != "*", r["label"], r["lo"])):
             if r["mac"] == "*":
@@ -5475,10 +5483,11 @@ def port_rules_body(names=None):
     else:
         lines += port_rules_lines(names)
     lines += ["",
-              "Allow rules are checked first; a matching allow beats any block,",
-              "and beats the gate, the forbidden area and a forward-mode close()",
-              "for that device and port. Ports are destination ports on",
-              "forwarded traffic -- the router's own ports are not covered.",
+              "Block rules are applied first; where an allow and a block match",
+              "the same device and port, the block wins (BR-2). An allow that no",
+              "block contradicts also passes the gate and forbidden area for that",
+              "port. Ports are destination ports on forwarded traffic -- the",
+              "router's own ports are not covered.",
               "Rules are keyed on MAC and persist across restarts.",
               "",
               "On the router: iptables -L %s -n -v   (the pkts column on a"
@@ -6145,7 +6154,7 @@ def main():
     if args.accept_commands:
         print("  block(x.x.x.x, 443) / block(*, 23) / block(x.x.x.x, 6881-6889, udp) "
               "/ allow(x.x.x.x, 80) / unblock(...) / unallow(...) / rules() -- "
-              "per-port control, keyed on MAC, allows win%s"
+              "per-port control, keyed on MAC, a block overrides an allow%s"
               % ("  [DRY RUN]" if args.ports_dry_run else ""))
 
     meter = Meter(nets)

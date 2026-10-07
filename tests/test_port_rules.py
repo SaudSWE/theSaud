@@ -164,18 +164,33 @@ check("udp range -> one rule with lo:hi",
 r = sw.port_rule_cmd("block", "*", 23, 23, "tcp", NETS)
 check("wildcard -> no MAC match", "-p tcp --dport 23 -j DROP" in CHAINS["SW_PORTS"])
 
-print("\nallow is ordered before block and ACCEPTs:")
+print("\nblock-wins precedence (Control.Precedence / BR-2): blocks ordered first:")
 r = sw.port_rule_cmd("allow", "192.168.8.50", 80, 80, "tcp", NETS)
-check("allow announced with ACCEPT caveat", "ACCEPT" in r)
-check("allow is first in chain",
-      CHAINS["SW_PORTS"][0] ==
-      "-m mac --mac-source aa:bb:cc:dd:ee:50 -p tcp --dport 80 -j ACCEPT")
-check("blocks follow", all("DROP" in x for x in CHAINS["SW_PORTS"][1:]))
+check("allow announced as ACCEPT", "ACCEPT" in CHAINS["SW_PORTS"][-1]
+      and r.startswith("*** ALLOW"))
+check("all DROPs come before all ACCEPTs in the chain",
+      max((i for i, x in enumerate(CHAINS["SW_PORTS"]) if "-j DROP" in x),
+          default=-1)
+      < min((i for i, x in enumerate(CHAINS["SW_PORTS"]) if "-j ACCEPT" in x),
+            default=len(CHAINS["SW_PORTS"])))
+check("the new allow is an ACCEPT rule",
+      "-m mac --mac-source aa:bb:cc:dd:ee:50 -p tcp --dport 80 -j ACCEPT"
+      in CHAINS["SW_PORTS"])
 r = sw.port_rule_cmd("block", "192.168.8.50", 80, 80, "both", NETS)
-check("block overlapping an allow warns that allows win", "allows win" in r)
-check("allow still first after rebuild", CHAINS["SW_PORTS"][0].endswith("-j ACCEPT"))
-check("port_allows_for lists the hole",
-      sw.port_allows_for("aa:bb:cc:dd:ee:50") == ["tcp 80"])
+check("block overlapping an allow notes the block wins",
+      "a block always wins" in r and "BR-2" in r)
+check("after adding the block, its DROP precedes the ACCEPT",
+      next(i for i, x in enumerate(CHAINS["SW_PORTS"])
+           if "--dport 80 -j DROP" in x)
+      < next(i for i, x in enumerate(CHAINS["SW_PORTS"])
+             if "--dport 80 -j ACCEPT" in x))
+check("adding an allow that a block overlaps warns the allow is overridden",
+      "a block wins" in sw.port_rule_cmd("allow", "192.168.8.50", 443, 443,
+                                         "tcp", NETS))
+# that allow was only to check the warning -- drop it so the state below is clean
+sw.port_rule_cmd("unallow", "192.168.8.50", 443, 443, "tcp", NETS)
+check("port_allows_for still lists the hole",
+      "tcp 80" in sw.port_allows_for("aa:bb:cc:dd:ee:50"))
 r = sw.port_rule_cmd("allow", "*", 53, 53, "udp", NETS)
 check("wildcard allow listed for any device",
       "udp 53" in sw.port_allows_for("aa:bb:cc:dd:ee:60"))
@@ -276,7 +291,7 @@ sw.port_rule_cmd("allow", "192.168.8.50", 80, 80, "tcp", NETS)
 sw.port_rule_cmd("block", "*", 23, 23, "both", NETS)
 body = sw.port_rules_body()
 lines = [l for l in body.splitlines() if l.startswith(("ALLOW", "BLOCK"))]
-check("three rules listed, allow first", len(lines) == 3 and lines[0].startswith("ALLOW"))
+check("three rules listed, block first", len(lines) == 3 and lines[0].startswith("BLOCK"))
 check("hostname shown", "192.168.8.50 (phone)" in body)
 check("wildcard shown", "* (all devices)" in body)
 check("teardown string names the chain", "iptables -X SW_PORTS" in sw.ports_teardown())
