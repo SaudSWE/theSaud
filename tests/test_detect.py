@@ -186,5 +186,75 @@ finally:
     else:
         sys.modules["smtplib"] = real_smtp
 
+print("\nNTP stepping the router's clock (seen live: +18 h 33 min) fakes nothing:")
+JUMP = 66781                      # the live offset ntpd applied
+W0 = 1791385000.0                 # wall clock before the fix (wrong by JUMP)
+clock = {"mono": 1000.0, "wall": W0, "jumped": False}
+
+
+class Stop(Exception):
+    pass
+
+
+def fake_sleep(dt):
+    clock["mono"] += dt
+    clock["wall"] += dt
+    if not clock["jumped"] and clock["mono"] >= clock["jump_at"]:
+        clock["wall"] += JUMP     # ntpd -q steps the wall clock, not monotonic
+        clock["jumped"] = True
+    if clock["mono"] > clock["stop_at"]:
+        raise Stop
+
+
+saved = {k: getattr(sw, k) for k in ("health_log", "_detect_mail", "hostname_map",
+                                     "present_macs", "watched_macs", "ip_for_mac",
+                                     "upstream_reachable")}
+saved_time = (sw.time.time, sw.time.monotonic, sw.time.sleep)
+logged = []
+try:
+    sw.time.time = lambda: clock["wall"]
+    sw.time.monotonic = lambda: clock["mono"]
+    sw.time.sleep = fake_sleep
+    sw.health_log = lambda kind, t=None, **kw: logged.append(dict(kw, kind=kind, t=t))
+    sw._detect_mail = lambda cfg, subject, body: None
+    sw.hostname_map = lambda: {"192.168.8.135": "iPhone"}
+    sw.ip_for_mac = lambda mac: "192.168.8.135"
+    sw.watched_macs = lambda: {PHONE}
+    PHONE = "d6:95:79:3b:1c:4a"
+    # phone seen until mono 1090, gone, back at 1500; clock stepped at 1250
+    sw.present_macs = lambda: {PHONE} if clock["mono"] < 1100 or clock["mono"] >= 1500 else set()
+    clock.update(jump_at=1250, stop_at=1600)
+    try:
+        sw.presence_watcher(None, 10, 300)
+    except Stop:
+        pass
+    miss = [x for x in logged if x["kind"] == "device_missing"]
+    back = [x for x in logged if x["kind"] == "device_back"]
+    check("no instant MISSING when the clock jumps (alert after the real 300 s)",
+          len(miss) == 1 and miss[0]["t"] == W0 + JUMP + 390)
+    check("'not seen since' given in the corrected clock",
+          _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(W0 + JUMP + 90)) in miss[0]["detail"])
+    check("BACK duration is the real 410 s, not 18 h",
+          len(back) == 1 and back[0]["duration_s"] == 410)
+
+    logged[:] = []
+    clock.update(mono=2000.0, wall=W0, jumped=False, jump_at=2080, stop_at=2300)
+    sw.upstream_reachable = lambda anchors=None: not (2050 <= clock["mono"] < 2210)
+    try:
+        sw.outage_watcher(None, 10, 3)
+    except Stop:
+        pass
+    down = [x for x in logged if x["kind"] == "internet_down"]
+    up = [x for x in logged if x["kind"] == "internet_up"]
+    check("outage straddling the clock step: DOWN logged once", len(down) == 1)
+    check("outage length is the real 160 s, not 160 s + 18 h",
+          len(up) == 1 and up[0]["duration_s"] == 160)
+    check("cut and restored times both in the corrected clock",
+          up[0]["down_since"] == W0 + JUMP + 50 and up[0]["restored"] == W0 + JUMP + 210)
+finally:
+    sw.time.time, sw.time.monotonic, sw.time.sleep = saved_time
+    for k, v in saved.items():
+        setattr(sw, k, v)
+
 print("\n%d passed, %d failed" % (PASS[0], FAIL[0]))
 sys.exit(1 if FAIL[0] else 0)

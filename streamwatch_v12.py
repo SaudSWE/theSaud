@@ -1532,10 +1532,30 @@ def _detect_mail(cfg, subject, body):
         print("  [detect: email FAILED: %s]" % e)
 
 
+# The monitors run on the monotonic clock, not the wall clock: the router has
+# no RTC, boots with a stale time and NTP then steps it -- seen live, by 18 h
+# 33 min -- which on the wall clock fakes a "missing since yesterday" alert
+# and stretches any outage it falls inside. Event times become wall-clock
+# times only when reported, by which point NTP has normally fixed the clock,
+# so the dates come out right too.
+_TIME_KEYS = ("t", "down_since", "confirmed_at", "last_seen", "missing_since")
+
+
+def _to_wall(ev):
+    if not ev:
+        return ev
+    now_wall, now_mono = time.time(), time.monotonic()
+    ev = dict(ev)
+    for k in _TIME_KEYS:
+        if k in ev:
+            ev[k] = now_wall - (now_mono - ev[k])
+    return ev
+
+
 def outage_watcher(cfg, every, fail_n, anchors=DETECT_ANCHORS):
     mon = OutageMonitor(fail_n)
     while True:
-        ev = mon.step(time.time(), upstream_reachable(anchors))
+        ev = _to_wall(mon.step(time.monotonic(), upstream_reachable(anchors)))
         if ev and ev["kind"] == "internet_down":
             health_log("internet_down", t=ev["t"], down_since=ev["t"],
                        detail="no answer from %s; confirmed %s" % (
@@ -1574,12 +1594,12 @@ DETECT_WATCH = set()
 
 def presence_watcher(cfg, every, missing_after):
     mon = PresenceMonitor(missing_after)
-    names_at, names = 0, {}
+    names_at, names = float("-inf"), {}
     while True:
-        now = time.time()
+        now = time.monotonic()
         if now - names_at > 60:
             names, names_at = hostname_map(), now
-        for ev in mon.step(now, watched_macs(), present_macs()):
+        for ev in map(_to_wall, mon.step(now, watched_macs(), present_macs())):
             ip = ip_for_mac(ev["mac"]) or ""
             label = "%s (%s)" % (names.get(ip) or ev["mac"], ip or ev["mac"])
             if ev["kind"] == "device_missing":
