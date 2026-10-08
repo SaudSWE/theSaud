@@ -1530,7 +1530,7 @@ def outage_watcher(cfg, every, fail_n, anchors=DETECT_ANCHORS):
     while True:
         ev = mon.step(time.time(), upstream_reachable(anchors))
         if ev and ev["kind"] == "internet_down":
-            health_log("internet_down", t=ev["t"],
+            health_log("internet_down", t=ev["t"], down_since=ev["t"],
                        detail="no answer from %s; confirmed %s" % (
                            ", ".join("%s:%d" % a for a in anchors),
                            _stamp(ev["confirmed_at"])))
@@ -1540,6 +1540,7 @@ def outage_watcher(cfg, every, fail_n, anchors=DETECT_ANCHORS):
         elif ev:
             dur = human_dur(ev["duration_s"])
             health_log("internet_up", t=ev["t"], duration_s=ev["duration_s"],
+                       down_since=ev["down_since"], restored=ev["t"],
                        detail="down from %s to %s" % (_stamp(ev["down_since"]),
                                                       _stamp(ev["t"])))
             print("INTERNET BACK  outage %s -> %s (%s)"

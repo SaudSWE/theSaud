@@ -136,6 +136,10 @@ COLUMNS = [
     ("value", "Generic number whose meaning is in 'unit' (latency, load, uptime, limit, ...).", ""),
     ("unit", "Unit of 'value'.", ""),
     ("domain", "dns_query: the domain name (site address) the device looked up, e.g. www.youtube.com. Name only -- never the page path or content (PRV-4).", ""),
+    ("cut_date", "malfunction (internet): date the internet was cut (first failed check), YYYY-MM-DD.", ""),
+    ("cut_time", "malfunction (internet): time the internet was cut, HH:MM:SS.", ""),
+    ("restored_date", "malfunction (internet): date the internet came back, YYYY-MM-DD; empty while still down.", ""),
+    ("restored_time", "malfunction (internet): time the internet came back, HH:MM:SS; empty while still down.", ""),
     ("access_time", "internet_access: when the device's access was set on the gateway (time written next to it in the allow/deny list), ISO 8601; empty for HELD.", ""),
     ("email_from", "email: sender address.", ""),
     ("email_to", "email: recipient address.", ""),
@@ -161,7 +165,7 @@ RECORD_TYPES = [
     ("sw_usage", "StreamWatch's own per-minute usage table: per device total_in / total_out / value = total bytes since StreamWatch started, signal or 'wired'; plus a summary row (value = live flows).", "every minute"),
     ("sw_quota", "StreamWatch data limit for a device: limit (value), used (total_in), period, blocked.", "on change"),
     ("sw_throttle", "StreamWatch speed limit for a device (down/up kbit in detail).", "on change"),
-    ("malfunction", "Item 9 / Detect: internet outages and missing devices, from StreamWatch on main123. category internet_down (state DOWN; timestamp = first failed check) and internet_up (state UP; duration_s = outage length; detail = down-from and restored times) -- together the outage history; device_missing (state MISSING; a device on the allow/watch list unseen for the set time; detail = last seen) and device_back (state BACK; duration_s = how long it was missing).", "as it happens"),
+    ("malfunction", "Item 9 / Detect: internet outages and missing devices, from StreamWatch on main123. category internet_down (state DOWN, written when the cut is confirmed: cut_date/cut_time = when the internet stopped) and internet_up (state UP: cut_date/cut_time AND restored_date/restored_time on the same row, duration_s = how long it was out) -- the internet_up rows are the outage history, one row per outage; device_missing (state MISSING; a device on the allow/watch list unseen for the set time; detail = last seen) and device_back (state BACK; duration_s = how long it was missing).", "as it happens"),
     ("email", "Every email StreamWatch sent (alerts, reports, replies) and every command email it received, refused or ignored as too old: category = sent, failed, received, refused or stale; email_from / email_to / email_subject; detail = first line sent, or the commands found. timestamp/date/time = when the email was handled on main123. Ordinary non-command mail is not recorded.", "as it happens"),
     ("internet_access", "When a device's internet access changed, from StreamWatch's allow/deny lists on main123: state GRANTED (on the allow list), BLOCKED (on the deny list; a block beats an allow), or HELD (on neither list -- has an address but no internet until approved). category = previous->new state, or 'initial' for the first row per device. timestamp = when the recorder saw the change; detail = the time and IP written next to the device in the list file.", "on change"),
     ("device_inventory", "StreamWatch's registry entry for a MAC: vendor, randomised, first/last seen, hostnames, IPs.", "on change"),
@@ -1270,7 +1274,14 @@ class Recorder:
                 if e.get("mac") or e.get("ip") else {}
             if e.get("name") and dev and not dev.get("device_name"):
                 dev["device_name"] = e["name"]
-            rows.append(rec("malfunction", t, **st_fields(MAIN), **dev,
+            cut = {}
+            for col, key in (("cut", "down_since"), ("restored", "restored")):
+                try:
+                    v = iso(float(e[key]))
+                    cut[col + "_date"], cut[col + "_time"] = v[:10], v[11:19]
+                except (KeyError, TypeError, ValueError):
+                    pass
+            rows.append(rec("malfunction", t, **st_fields(MAIN), **dev, **cut,
                             category=kind,
                             state={"internet_down": "DOWN", "internet_up": "UP",
                                    "device_missing": "MISSING",

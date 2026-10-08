@@ -85,8 +85,9 @@ check("radio + REACHABLE counted, STALE not",
 
 print("\nAI CSV malfunction rows:")
 dump = "## SYS\nUPTIME 1\n## HEALTH\n" + "\n".join(json.dumps(x) for x in [
-    {"t": 1791382000, "kind": "internet_down", "detail": "no answer"},
-    {"t": 1791382450, "kind": "internet_up", "duration_s": 450, "detail": "down from x to y"},
+    {"t": 1791382000, "kind": "internet_down", "detail": "no answer", "down_since": 1791382000},
+    {"t": 1791382450, "kind": "internet_up", "duration_s": 450, "detail": "down from x to y",
+     "down_since": 1791382000, "restored": 1791382450},
     {"t": 1791382600, "kind": "device_missing", "mac": "d6:95:79:3b:1c:4a",
      "ip": "192.168.8.135", "name": "iPhone", "detail": "not seen since z"},
 ]) + "\n## END\n"
@@ -100,7 +101,18 @@ check("rows dated by the event, with date/time", rows[0]["epoch"] == 1791382000
       and rows[0]["date"] and rows[0]["time"])
 check("device columns on device rows", rows[2]["device_mac"] == "d6:95:79:3b:1c:4a"
       and rows[2]["device_name"] == "iPhone")
+import time as _t
+cut = _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(1791382000))
+back = _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(1791382450))
+check("cut row: cut date/time, no restored yet",
+      (rows[0]["cut_date"] + " " + rows[0]["cut_time"]) == cut and rows[0]["restored_date"] == "")
+check("restored row: cut AND restored date/time on one row",
+      (rows[1]["cut_date"] + " " + rows[1]["cut_time"]) == cut
+      and (rows[1]["restored_date"] + " " + rows[1]["restored_time"]) == back)
+check("device rows leave the outage columns empty", rows[2]["cut_date"] == "")
 check("polled again -> no duplicates", r.health_rows(d) == [])
+check("dictionary has the cut/restored columns",
+      all(c in mr.FIELDS for c in ("cut_date", "cut_time", "restored_date", "restored_time")))
 check("dictionary documents malfunction",
       "malfunction" in dict((x[0], x[1]) for x in mr.RECORD_TYPES))
 
