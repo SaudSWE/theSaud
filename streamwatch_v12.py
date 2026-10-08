@@ -1374,7 +1374,8 @@ def gate_reensure():
 #     An alert email cannot leave while the internet is down, so the DOWN
 #     event is logged and printed at once and the email is held: it goes out
 #     the moment the link is back, carrying both times and the duration
-#     (ROB-2, queued alerts delivered once the connection returns).
+#     (ROB-2, queued alerts delivered once the connection returns). If that
+#     first send fails it is retried (DETECT_MAIL_RETRY), not dropped.
 #
 # DEVICE NOT CONNECTED
 #     Devices that should be present -- the allow list under --group-lists,
@@ -1515,12 +1516,18 @@ def _stamp(t):
     return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
 
 
+# The outage email goes out seconds after the link returns, while the uplink
+# may still be settling (seen live: one SMTP timeout 10 s after restore), so
+# a failed send is retried over ~18 min instead of the alert being lost.
+DETECT_MAIL_RETRY = (30, 60, 120, 300, 600)
+
+
 def _detect_mail(cfg, subject, body):
     if not cfg:
         return
     try:
         send_email_alert(cfg["server"], cfg["port"], cfg["user"], cfg["password"],
-                         cfg["to"], subject, body)
+                         cfg["to"], subject, body, retry_waits=DETECT_MAIL_RETRY)
     except Exception as e:
         print("  [detect: email FAILED: %s]" % e)
 
@@ -3633,15 +3640,18 @@ def _first_line(text):
 
 def send_email_alert(smtp_server, smtp_port, user, password, to_addr, subject, body,
                      include_latest=False, imap_server="imap.gmail.com",
-                     latest_wait=20, state=None, cmd_cfg=None):
+                     latest_wait=20, state=None, cmd_cfg=None, retry_waits=()):
     """Send the alert in a background thread so metering never blocks on SMTP.
 
     Lifted from portwatch.py. Two deviations: smtplib/email are imported inside
     the thread so a python3-light install still runs the metering half; and
     when include_latest is set a second email follows, carrying the first line
     of whatever is newest in the inbox by then -- normally the alert itself.
+
+    retry_waits: seconds to wait before each further attempt if sending fails
+    (empty = one attempt). Every failed attempt is still logged.
     """
-    def _post(subj, text, attachment=None):
+    def _post(subj, text, attachment=None, fail_note=""):
         import smtplib
         from email.message import EmailMessage
         msg = EmailMessage()
@@ -3659,7 +3669,8 @@ def send_email_alert(smtp_server, smtp_port, user, password, to_addr, subject, b
                 s.login(user, password)
                 s.send_message(msg)
         except Exception as e:
-            email_log("failed", user, to_addr, subj, "%s | %s" % (e, _first_line(text)))
+            email_log("failed", user, to_addr, subj,
+                      "%s%s | %s" % (e, fail_note, _first_line(text)))
             raise
         email_log("sent", user, to_addr, subj, _first_line(text))
 
@@ -3671,12 +3682,18 @@ def send_email_alert(smtp_server, smtp_port, user, password, to_addr, subject, b
             print("  [email alert FAILED: install python3-email and python3-openssl]")
             return
 
-        try:
-            _post(subject, body)
-            print("  [email alert sent to %s]" % to_addr)
-        except Exception as e:
-            print("  [email alert FAILED: %s]" % e)
-            return
+        waits = list(retry_waits)
+        while True:
+            note = "; retrying in %d s" % waits[0] if waits else ""
+            try:
+                _post(subject, body, fail_note=note)
+                print("  [email alert sent to %s]" % to_addr)
+                break
+            except Exception as e:
+                print("  [email alert FAILED: %s%s]" % (e, note))
+                if not waits:
+                    return
+                time.sleep(waits.pop(0))
 
         if not include_latest:
             return

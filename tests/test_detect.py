@@ -116,5 +116,75 @@ check("dictionary has the cut/restored columns",
 check("dictionary documents malfunction",
       "malfunction" in dict((x[0], x[1]) for x in mr.RECORD_TYPES))
 
+print("\nalert email retried, not lost, when the first send fails:")
+
+
+class FakeSMTP:
+    fails, tries = 0, 0
+
+    def __init__(self, *a, **k):
+        FakeSMTP.tries += 1
+        if FakeSMTP.tries <= FakeSMTP.fails:
+            raise OSError("Connection unexpectedly closed: timed out")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def starttls(self):
+        pass
+
+    def login(self, u, p):
+        pass
+
+    def send_message(self, m):
+        pass
+
+
+class SyncThread:
+    def __init__(self, target, daemon=None):
+        self.target = target
+
+    def start(self):
+        self.target()
+
+
+real_smtp, real_thread, real_sleep = sys.modules.get("smtplib"), sw.threading.Thread, sw.time.sleep
+sys.modules["smtplib"] = types.SimpleNamespace(SMTP=FakeSMTP)
+sw.threading.Thread = SyncThread
+slept = []
+sw.time.sleep = slept.append
+cfg = {"server": "smtp.x", "port": 587, "user": "sw@x", "password": "p", "to": "admin@x"}
+try:
+    sw.EMAIL_LOG = os.path.join(tempfile.mkdtemp(), "emails.log")
+    FakeSMTP.fails, FakeSMTP.tries = 2, 0
+    sw._detect_mail(cfg, "[streamwatch] internet was DOWN for 1 min 0 s",
+                    "streamwatch - internet outage\n")
+    log = [json.loads(x) for x in open(sw.EMAIL_LOG)]
+    check("two timeouts, then sent", [x["dir"] for x in log] == ["failed", "failed", "sent"])
+    check("waits follow the retry schedule", slept == list(sw.DETECT_MAIL_RETRY[:2]))
+    check("failed rows say a retry is coming",
+          "retrying in 30 s" in log[0]["detail"] and "retrying in 60 s" in log[1]["detail"])
+    sw.EMAIL_LOG = os.path.join(tempfile.mkdtemp(), "emails.log")
+    FakeSMTP.fails, FakeSMTP.tries, slept[:] = 99, 0, []
+    sw._detect_mail(cfg, "s", "b")
+    log = [json.loads(x) for x in open(sw.EMAIL_LOG)]
+    check("gives up after the schedule (1 + %d tries)" % len(sw.DETECT_MAIL_RETRY),
+          len(log) == 1 + len(sw.DETECT_MAIL_RETRY) and all(x["dir"] == "failed" for x in log)
+          and "retrying" not in log[-1]["detail"])
+    sw.EMAIL_LOG = os.path.join(tempfile.mkdtemp(), "emails.log")
+    FakeSMTP.fails, FakeSMTP.tries, slept[:] = 99, 0, []
+    sw.send_email_alert("smtp.x", 587, "sw@x", "p", "admin@x", "s", "b")
+    check("other alerts keep one attempt (no retry_waits)",
+          FakeSMTP.tries == 1 and slept == [])
+finally:
+    sw.time.sleep, sw.threading.Thread = real_sleep, real_thread
+    if real_smtp is None:
+        sys.modules.pop("smtplib", None)
+    else:
+        sys.modules["smtplib"] = real_smtp
+
 print("\n%d passed, %d failed" % (PASS[0], FAIL[0]))
 sys.exit(1 if FAIL[0] else 0)
