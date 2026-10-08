@@ -160,7 +160,7 @@ RECORD_TYPES = [
     ("router_health", "Station health: uptime, load (value), free memory, temperature, clients; 'unreachable' when SSH fails; WAN bytes/rates on main123.", "every health interval (60 s)"),
     ("internet_latency", "Latency to the internet measured by StreamWatch (value, ms).", "as logged (about every 5 s)"),
     ("router_log", "Router syslog line, categorised: wifi, dhcp, ssh, ssh_fail, streamwatch, kernel, network, system.", "as logged"),
-    ("dns_query", "Browsing history: a device looked up a site address. One row per lookup, for every device that uses the router for DNS: device_ip/mac/name, domain, category = record type asked (A = IPv4, AAAA = IPv6, HTTPS = service info), date/time of the lookup. The recorder switches dnsmasq query logging on and enlarges the router log buffer itself, so no lookup is missed between samples. A device using encrypted DNS (DoH/DoT) to an outside server does not appear.", "as logged"),
+    ("dns_query", "Browsing history: a CONNECTED DEVICE looked up a site address. One row per lookup, for every device that uses the router for DNS: device_ip/mac/name, domain, category = record type asked (A = IPv4, AAAA = IPv6, HTTPS = service info), date/time of the lookup. The router's OWN lookups (from 127.0.0.1 -- its email-command polling, NTP, speed probe) are not browsing and are left out. The recorder switches dnsmasq query logging on and enlarges the router log buffer itself, so no lookup is missed between samples. A device using encrypted DNS (DoH/DoT) to an outside server does not appear.", "as logged"),
     ("dhcp_lease", "A device got / changed an IP lease.", "on change"),
     ("sw_usage", "StreamWatch's own per-minute usage table: per device total_in / total_out / value = total bytes since StreamWatch started, signal or 'wired'; plus a summary row (value = live flows).", "every minute"),
     ("sw_quota", "StreamWatch data limit for a device: limit (value), used (total_in), period, blocked.", "on change"),
@@ -1027,6 +1027,10 @@ class Recorder:
             if q:
                 if self.args.no_dns:
                     return None
+                src = q.group(3)
+                if src.startswith("127.") or src == "::1":
+                    return None    # the router's OWN lookups (email poll, ntp,
+                    # speed probe) -- not a connected device's browsing
                 return rec("dns_query", t, **st, category=q.group(1),
                            **self.dev(ip=q.group(3)), domain=q.group(2).lower(),
                            detail=q.group(2))
@@ -1051,6 +1055,10 @@ class Recorder:
                        **(self.dev(mac=macm.group(1)) if macm else {}),
                        link_state=ev.group(1) if ev else "", detail=msg)
         if low == "kernel":
+            if not getattr(self.args, "all_logs", False) \
+                    and level.lower() in ("debug", "info"):
+                return None        # boot/driver chatter; firewall LOG drops and
+                # real faults are notice/warn and are kept. --all-logs keeps all.
             return rec("router_log", t, **st, category="kernel", state=level, detail=msg)
         if low in ("netifd", "odhcpd", "odhcp6c", "ntpd", "firewall", "fw4"):
             return rec("router_log", t, **st, category="network", state=level,
@@ -1645,6 +1653,9 @@ def main():
                     help="LAN address prefix (default 192.168.8.)")
     ap.add_argument("--no-dns", action="store_true",
                     help="don't record domain lookups")
+    ap.add_argument("--all-logs", action="store_true",
+                    help="keep every router log line, including kernel info/"
+                         "debug boot chatter (default: those are dropped)")
     ap.add_argument("--verbose", action="store_true", help="print a line per sample")
     # import-history
     ap.add_argument("--events", default=os.path.join(TRACKER_DIR, "tracker_events.csv"))

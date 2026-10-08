@@ -202,5 +202,36 @@ check("dictionary documents domain + browsing",
       any(c[0] == "domain" for c in mr.COLUMNS)
       and "Browsing history" in dict((r[0], r[1]) for r in mr.RECORD_TYPES)["dns_query"])
 
+print("\nthe router's own lookups are not browsing:")
+stamp3 = _tm.strftime("%a %b %d %H:%M:%S %Y", _tm.localtime(1791382500))
+own = ["%s daemon.info dnsmasq[1]: query[A] imap.gmail.com from 127.0.0.1" % stamp3,
+       "%s daemon.info dnsmasq[1]: query[AAAA] imap.gmail.com from ::1" % stamp3,
+       "%s daemon.info dnsmasq[1]: query[A] rpc.hudhud.sa from 192.168.8.135" % stamp3]
+od = [x for x in r5.log_rows("main123", {"log": own}) if x["record_type"] == "dns_query"]
+check("loopback (127.0.0.1 / ::1) lookups dropped, real device kept",
+      len(od) == 1 and od[0]["domain"] == "rpc.hudhud.sa"
+      and od[0]["device_ip"] == "192.168.8.135")
+check("dictionary notes the router's own lookups are left out",
+      "127.0.0.1" in dict((r[0], r[1]) for r in mr.RECORD_TYPES)["dns_query"])
+
+print("\nkernel boot chatter trimmed, real faults and other logs kept:")
+klog = ["%s kern.info kernel: usb 1-1: new high-speed USB device" % stamp3,
+        "%s kern.debug kernel: random: crng init done" % stamp3,
+        "%s kern.warning kernel: wlan0: DROP IN=eth0 SRC=1.2.3.4" % stamp3,
+        "%s authpriv.notice dropbear[9]: Bad password attempt for root from 1.2.3.4" % stamp3,
+        "%s daemon.info netifd: Interface 'wan' is now up" % stamp3]
+r6 = mr.Recorder(types.SimpleNamespace(out=TMP, lan_prefix="192.168.8.",
+                                       no_dns=False, log_backfill=10 ** 10))
+kr = r6.log_rows("main123", {"log": klog})
+cats = [(x["category"], x["state"]) for x in kr if x["record_type"] == "router_log"]
+check("kernel info/debug dropped", ("kernel", "info") not in cats and ("kernel", "debug") not in cats)
+check("kernel warning (firewall drop) kept", ("kernel", "warning") in cats)
+check("failed SSH login always kept", any(x["category"] == "ssh_fail" for x in kr))
+check("network daemon line kept", ("network", "info") in cats)
+r7 = mr.Recorder(types.SimpleNamespace(out=TMP, lan_prefix="192.168.8.",
+                                       no_dns=False, log_backfill=10 ** 10, all_logs=True))
+kr2 = [x for x in r7.log_rows("main123", {"log": klog}) if x["category"] == "kernel"]
+check("--all-logs keeps the kernel info/debug lines", len(kr2) == 3)
+
 print("\n%d passed, %d failed" % (PASS[0], FAIL[0]))
 sys.exit(1 if FAIL[0] else 0)
