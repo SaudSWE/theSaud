@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the StreamWatch report mailer on a schedule
+
+[Timer]
+# As requested: every minute. WARNING: ~1440 emails/day will get a free Gmail
+# account suspended. Change OnCalendar to a saner cadence, e.g.:
+#   *:0/15   -> every 15 minutes
+#   hourly   -> once an hour
+OnCalendar=minutely
+Persistent=false
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
