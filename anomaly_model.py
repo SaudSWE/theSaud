@@ -18,7 +18,9 @@ HOW IT WORKS
   heavy user is not automatically "abnormal". Each device is then scored by
   its most extreme feature -- a robust z-score, i.e. how many robust standard
   deviations it sits from the median -- and anything past --threshold (default
-  4) is flagged, highest first.
+  4) is flagged, highest first. Only the HIGH side counts: for security,
+  excess is the concern (too much data, too many flows, too much flapping);
+  a device that is merely quiet is not an anomaly here.
 
   This is a drop-in slot: swap fit()/score() for scikit-learn's IsolationForest
   later if you install it; the CLI and the feature contract stay the same.
@@ -102,11 +104,17 @@ def robust_z(model, col, row):
 
 
 def score(model, row):
-    """(headline score, [(feature, z) ...] reasons sorted by |z|)."""
+    """(headline score, [(feature, z) ...] sorted most-positive first).
+
+    Scored on the HIGH side only: for security, excess is the concern -- too
+    much data, too many flows, too much flapping, too many blocks. A device
+    that is merely quiet (every feature below the median) is NOT an anomaly.
+    Catching a normally-busy device that goes silent is the job of the
+    per-device-over-time model, not this cross-device one."""
     zs = [(col, robust_z(model, col, row)) for col, _ in FEATURES if col in model]
-    zs.sort(key=lambda kv: abs(kv[1]), reverse=True)
-    headline = abs(zs[0][1]) if zs else 0.0
-    return headline, zs
+    zs.sort(key=lambda kv: kv[1], reverse=True)
+    headline = max((z for _, z in zs), default=0.0)
+    return max(headline, 0.0), zs
 
 
 def rank(rows, model=None, threshold=THRESHOLD):
@@ -115,7 +123,7 @@ def rank(rows, model=None, threshold=THRESHOLD):
     out = []
     for r in rows:
         headline, zs = score(model, r)
-        reasons = [(c, z) for c, z in zs if abs(z) >= CONTRIB]
+        reasons = [(c, z) for c, z in zs if z >= CONTRIB]   # high-side only
         out.append({
             "mac": r.get("mac", ""), "ip": r.get("ip", ""),
             "name": r.get("name", ""), "score": round(headline, 2),

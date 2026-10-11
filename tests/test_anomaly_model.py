@@ -61,6 +61,18 @@ reasons = dict(ranked[0]["reasons"])
 check("bytes_total named as a reason, high", "bytes_total" in reasons and reasons["bytes_total"] > 0)
 check("fast_flaps named as a reason, high", "fast_flaps" in reasons and reasons["fast_flaps"] > 0)
 
+print("\nhigh side only: a quiet (below-median) device is NOT an anomaly:")
+busy = [dev(mac="b%d" % i, name="busy%d" % i, bytes_total=500_000_000,
+            large_flows=20, dns_queries=400, online_s=20000)
+        for i in range(8)]
+quiet = dev(mac="quiet", name="quiet", bytes_total=100, large_flows=0,
+            dns_queries=0, online_s=60)
+rq, _ = am.rank(busy + [quiet], threshold=4.0)
+qd = next(d for d in rq if d["name"] == "quiet")
+check("the quiet device is not flagged", not qd["anomaly"])
+check("its score is ~0, not a huge negative-driven number", qd["score"] <= 1.0)
+check("no 'low' reasons are reported", all(z > 0 for _, z in qd["reasons"]))
+
 print("\nlog-scaling: a merely heavy (not extreme) user is not auto-flagged:")
 # heavy-tailed bytes: most small, a few large, one 3x the largest
 heavy = [dev(mac="h%d" % i, bytes_total=b) for i, b in enumerate(
