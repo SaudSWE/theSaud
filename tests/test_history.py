@@ -97,5 +97,23 @@ with gzip.open(os.path.join(d, "records_2026-10-06.csv.gz"), "wt", newline="") a
 loaded = h.load(d)
 check("both files read, gz included, sorted", [r["epoch"] for r in loaded] == ["50", "100"])
 
+print("\nsurvives a stray header row mixed into the data:")
+mixed = [{"epoch": "epoch", "record_type": "record_type"},        # a header line
+         {"epoch": "date", "record_type": "time"},                # a shifted header
+         row("internet_access", 100, device_name="iPhone", state="GRANTED")]
+ev = h.events(mixed)
+check("header/junk rows skipped, real event kept",
+      [e["record_type"] for e in ev] == ["internet_access"])
+dd = tempfile.mkdtemp()
+with open(os.path.join(dd, "records_2026-10-07.csv"), "w", newline="") as f:
+    cols = list(row("x", 1).keys())
+    wr = csv.writer(f)
+    wr.writerow(cols)
+    wr.writerow([row("malfunction", 100, state="DOWN")[c] for c in cols])
+    wr.writerow(cols)                                             # header mid-file
+    wr.writerow([row("malfunction", 200, state="UP")[c] for c in cols])
+check("load drops the mid-file header line",
+      [r["epoch"] for r in h.load(dd)] == ["100", "200"])
+
 print("\n%d passed, %d failed" % (PASS[0], FAIL[0]))
 sys.exit(1 if FAIL[0] else 0)

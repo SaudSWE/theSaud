@@ -52,6 +52,16 @@ def num(r, k):
         return 0.0
 
 
+def epoch_of(r):
+    """The row's epoch as an int, or None if this is not a real data row --
+    a stray header line or junk (e.g. a file concatenated with its own header
+    after the clock jump) has 'epoch' or 'date' here, not a number."""
+    try:
+        return int(r.get("epoch"))
+    except (TypeError, ValueError):
+        return None
+
+
 def key_of(r):
     return (r.get("device_mac") or r.get("device_ip") or "").strip().lower()
 
@@ -65,7 +75,8 @@ def load(folder):
                 rows.extend(csv.DictReader(fh))
         except OSError:
             pass
-    rows.sort(key=lambda r: int(r.get("epoch") or 0))
+    rows = [r for r in rows if epoch_of(r) is not None]   # drop header/junk rows
+    rows.sort(key=epoch_of)
     return rows
 
 
@@ -113,7 +124,9 @@ def aggregate(rows, flap_seconds=FLAP_SECONDS):
         if not k:
             continue
         rt = r.get("record_type", "")
-        t = int(r.get("epoch") or 0)
+        t = epoch_of(r)
+        if t is None:
+            continue
         first_seen.setdefault(k, t)
         last_seen[k] = t
         d = ident.setdefault(k, {"ip": "", "name": "", "vendor": ""})

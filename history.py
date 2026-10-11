@@ -24,6 +24,15 @@ import sys
 
 DEFAULT_DIR = os.path.expanduser("~/mesh_records")
 
+
+def epoch_of(r):
+    """The row's epoch as an int, or None for a non-data row -- a stray header
+    line or junk mixed into a file has 'epoch'/'date' here, not a number."""
+    try:
+        return int(r.get("epoch"))
+    except (TypeError, ValueError):
+        return None
+
 # record types that are always an event worth showing
 ALWAYS = {"malfunction", "internet_access", "email", "dhcp_lease"}
 # tracker states that are only RSSI jitter, not a real move
@@ -86,7 +95,8 @@ def load(folder):
                 rows.extend(csv.DictReader(fh))
         except OSError:
             pass
-    rows.sort(key=lambda r: int(r.get("epoch") or 0))
+    rows = [r for r in rows if epoch_of(r) is not None]   # drop header/junk rows
+    rows.sort(key=epoch_of)
     return rows
 
 
@@ -95,7 +105,7 @@ def events(rows, browsing=False, show_all=False, match=()):
     distinct listening port's first appearance, and an optional device filter."""
     seen_ports = set()
     out = []
-    for r in sorted(rows, key=lambda r: int(r.get("epoch") or 0)):
+    for r in sorted((x for x in rows if epoch_of(x) is not None), key=epoch_of):
         if not keep_event(r, browsing, show_all):
             continue
         if r.get("record_type") == "open_port" and not show_all:

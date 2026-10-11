@@ -101,6 +101,29 @@ check("csv has a row per device with the key columns",
       and back[0]["mac"] == PHONE and back[0]["online_s"] == "600")
 check("nodes flattened to a string in csv", back[0]["nodes"] == "L1")
 
+print("\nsurvives a stray header row mixed into the data (clock-jump artifact):")
+header_like = {"epoch": "epoch", "record_type": "record_type", "device_mac": "device_mac"}
+date_shift = {"epoch": "date", "record_type": "time"}   # old-schema header read shifted
+mixed = [header_like, date_shift,
+         row("device_traffic", 500, device_mac=PHONE, device_ip="192.168.8.135", bytes_in=1000)]
+check("epoch_of flags non-numeric rows", dr.epoch_of(header_like) is None
+      and dr.epoch_of(date_shift) is None and dr.epoch_of(mixed[2]) == 500)
+a3 = dr.aggregate(mixed)
+check("aggregate skips them, keeps the real row", list(a3) == [PHONE]
+      and a3[PHONE]["bytes_in"] == 1000)
+
+D = tempfile.mkdtemp()
+with open(os.path.join(D, "records_2026-10-07.csv"), "w", newline="") as f:
+    cols = list(row("x", 1).keys())
+    w = csv.writer(f)
+    w.writerow(cols)                                   # header
+    w.writerow([row("device_traffic", 100, device_mac=PHONE, bytes_in=5)[c] for c in cols])
+    w.writerow(cols)                                   # a SECOND header, mid-file
+    w.writerow([row("device_traffic", 200, device_mac=PHONE, bytes_in=5)[c] for c in cols])
+loaded = dr.load(D)
+check("load drops the mid-file header, keeps both data rows",
+      [r["epoch"] for r in loaded] == ["100", "200"])
+
 print("\nhelpers:")
 check("human bytes", dr.human(1536) == "1.5 KB")
 check("human duration", dr.human_dur(3660) == "1 h 1 min")
