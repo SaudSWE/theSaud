@@ -58,11 +58,35 @@ contents (PRV-4), within the consented household scope (BR-7).
 - **Metadata only.** Domains and flow sizes/ports, never contents.
 - **Consent.** Household devices, with the household's knowledge.
 
-### Tools that produce the feature layer
+### The model: classical ML, offline, on the server
+Chosen approach: **classical ML, run locally** — no cloud API, no data leaving
+the network (PRV). First model shipped: a robust anomaly detector.
+
 - `device_report.py` — one section per device (online time, data, browsing,
   file transfer, sessions/flaps, location, access), sorted longest-online
-  first; `--csv` writes a per-device feature table for training.
+  first; `--csv` writes a per-device feature table for the model.
 - `history.py` — the time-ordered activity log of meaningful events.
+- `anomaly_model.py` — reads the feature table, learns each feature's median
+  and MAD across devices (robust: the outliers don't skew the baseline),
+  log-scales heavy-tailed features, and scores every device by its most
+  extreme robust z-score; past `--threshold` it is flagged, with the features
+  that drove the flag named (explainable, not a black box). Pure stdlib — no
+  pip, no GPU, runs on the Pi, fully offline. fit()/score() is a drop-in slot:
+  swap in scikit-learn's IsolationForest later without changing the contract.
+
+Pipeline:
+```
+python3 device_report.py --csv ~/features.csv   # build the feature table
+python3 anomaly_model.py ~/features.csv          # flag the odd device(s)
+```
+
+Model roadmap (all classical, all local):
+- score a device against its OWN history over time (not just against peers),
+  which is the stronger signal once more data accumulates;
+- once the three "next" features land (speed impact, per-node usage, download
+  that affects the system), they become model inputs too;
+- optional upgrade to scikit-learn (IsolationForest / clustering) if installed,
+  behind the same fit()/score() interface.
 
 ### The three "next" items, concretely
 1. **Speed impact** — bin time (e.g. 1 min), take latency per bin from
