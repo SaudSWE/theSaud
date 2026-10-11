@@ -91,15 +91,50 @@ a2 = dr.aggregate(flappy, flap_seconds=120)
 check("the 30 s session is a flap, the 700 s one is not", a2[PHONE]["fast_flaps"] == 1)
 
 print("\nsorted longest-online-first; feature CSV round-trips:")
-devs = sorted(agg.values(), key=lambda d: d["online_s"], reverse=True)
+devs = dr.select(agg)
 check("iPhone (600 s) sorts above pi (260 s)", devs[0]["mac"] == PHONE)
 tmp = os.path.join(tempfile.mkdtemp(), "feats.csv")
-dr.write_csv(agg, tmp)
+dr.write_csv(devs, tmp)
 back = list(csv.DictReader(open(tmp)))
 check("csv has a row per device with the key columns",
       len(back) == 2 and set(dr.CSV_COLS) <= set(back[0])
       and back[0]["mac"] == PHONE and back[0]["online_s"] == "600")
 check("nodes flattened to a string in csv", back[0]["nodes"] == "L1")
+
+print("\ninfrastructure and non-addresses are filtered out:")
+check("loopback dropped", not dr.is_client({"ip": "127.0.0.1", "mac": "127.0.0.1"}))
+check("network address .0 dropped", not dr.is_client({"ip": "192.168.8.0", "mac": "192.168.8.0"}))
+check("broadcast .255 dropped", not dr.is_client({"ip": "192.168.8.255", "mac": "192.168.8.255"}))
+check("null MAC dropped", not dr.is_client({"ip": "192.168.8.9", "mac": "00:00:00:00:00:00"}))
+check("multicast MAC dropped", not dr.is_client({"ip": "192.168.8.9", "mac": "01:00:5e:00:00:fb"}))
+check("a node's own self-traffic dropped",
+      not dr.is_client({"ip": "192.168.8.1", "mac": "192.168.8.1"}, stations={"192.168.8.1"}))
+check("a real client is kept", dr.is_client({"ip": "192.168.8.135", "mac": PHONE}))
+check("a randomised (locally-administered) phone MAC is kept",
+      dr.is_client({"ip": "192.168.8.131", "mac": "6a:44:f8:04:25:aa"}))
+check("the Pi keeps its entry even though its IP is a station IP (it has a real MAC)",
+      dr.is_client({"ip": "192.168.8.162", "mac": PI}, stations={"192.168.8.162"}))
+
+print("\nzero-signal identities dropped unless --all-devices:")
+quiet = {"online_s": 0, "bytes_total": 0, "dns_queries": 0, "sessions": 0, "access_state": ""}
+busy = {"online_s": 0, "bytes_total": 5, "dns_queries": 0, "sessions": 0, "access_state": ""}
+check("no signal -> dropped", not dr.has_signal(quiet))
+check("any bytes -> kept", dr.has_signal(busy))
+noise = {"88:a2:9e:67:e1:70": dict(agg[PI], mac="88:a2:9e:67:e1:70", ip="", online_s=0,
+                                   bytes_total=0, dns_queries=0, sessions=0, access_state=""),
+         PHONE: agg[PHONE]}
+check("select() hides the quiet identity, --all-devices shows it",
+      [d["mac"] for d in dr.select(noise)] == [PHONE]
+      and len(dr.select(noise, show_all=True)) == 2)
+
+print("\ncomma-joined MAC keyed on the first; absurd rate ignored:")
+check("two-MAC field keys on the first MAC",
+      dr.key_of({"device_mac": "88:a2:9e:67:e1:70,88:a2:9e:67:e1:72"}) == "88:a2:9e:67:e1:70")
+glitch = dr.aggregate([
+    row("device_traffic", 100, device_mac=PHONE, rate_in_kbps=40000),
+    row("device_traffic", 110, device_mac=PHONE, rate_in_kbps=3473852)])   # 3.4 Gbps glitch
+check("peak rate ignores the impossible 3.4 Gbps sample",
+      glitch[PHONE]["peak_rate_kbps"] == 40000)
 
 print("\nsurvives a stray header row mixed into the data (clock-jump artifact):")
 header_like = {"epoch": "epoch", "record_type": "record_type", "device_mac": "device_mac"}

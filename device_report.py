@@ -37,12 +37,16 @@ import csv
 import glob
 import gzip
 import os
+import re
 import sys
 from collections import Counter, defaultdict
 
 DEFAULT_DIR = os.path.expanduser("~/mesh_records")
 BIG_FLOW = 10 * 1024 * 1024          # 10 MB: "large" transfer
 FLAP_SECONDS = 120                   # a session shorter than this is a fast in/out
+RATE_CEILING_KBPS = 2_000_000        # 2 Gbps: above this a rate sample is a
+#   counter-reset glitch (delta over a near-zero interval), not real throughput
+MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
 
 
 def num(r, k):
@@ -63,7 +67,43 @@ def epoch_of(r):
 
 
 def key_of(r):
-    return (r.get("device_mac") or r.get("device_ip") or "").strip().lower()
+    # a few records carry two MACs in the field (e.g. a host's two interfaces);
+    # key on the first so the identity is one MAC, not a comma-joined string.
+    mac = (r.get("device_mac") or "").split(",")[0].strip().lower()
+    return mac or (r.get("device_ip") or "").strip().lower()
+
+
+def collect_station_ips(rows):
+    """The IPs the routers/nodes report themselves as -- used to drop a node's
+    own self-traffic entry (keyed by its bare IP, no device MAC)."""
+    return {r["station_ip"] for r in rows if r.get("station_ip")}
+
+
+def is_client(d, stations=()):
+    """A real client device, not infrastructure or a non-address."""
+    ip, mac = d["ip"], d["mac"]
+    if ip.startswith("127.") or ip.endswith(".0") or ip.endswith(".255"):
+        return False                 # loopback, network and broadcast addresses
+    if MAC_RE.match(mac) and (mac == "00:00:00:00:00:00" or int(mac[:2], 16) & 1):
+        return False                 # null, broadcast or multicast MAC
+    if mac == ip and ip in stations:
+        return False                 # a node's own self-traffic (no real MAC)
+    return True
+
+
+def has_signal(d):
+    """Carries at least one feature worth giving the model."""
+    return bool(d["online_s"] or d["bytes_total"] or d["dns_queries"]
+                or d["sessions"] or d["access_state"])
+
+
+def select(agg, stations=(), show_all=False):
+    """Devices sorted longest-online first; real clients with signal unless
+    show_all keeps every identity."""
+    ds = sorted(agg.values(), key=lambda d: d["online_s"], reverse=True)
+    if show_all:
+        return ds
+    return [d for d in ds if is_client(d, stations) and has_signal(d)]
 
 
 def load(folder):
@@ -153,7 +193,9 @@ def aggregate(rows, flap_seconds=FLAP_SECONDS):
         elif rt == "device_traffic":
             bytes_in[k] += num(r, "bytes_in")
             bytes_out[k] += num(r, "bytes_out")
-            peak_rate[k] = max(peak_rate[k], num(r, "rate_in_kbps"), num(r, "rate_out_kbps"))
+            for v in (num(r, "rate_in_kbps"), num(r, "rate_out_kbps")):
+                if 0 <= v <= RATE_CEILING_KBPS:   # ignore counter-reset glitches
+                    peak_rate[k] = max(peak_rate[k], v)
         elif rt == "dns_query" and r.get("domain"):
             domains[k][r["domain"]] += 1
         elif rt in ("flow_end", "flow_active"):
@@ -227,8 +269,8 @@ def iso(epoch):
     return datetime.datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M")
 
 
-def report(agg, match=()):
-    devices = sorted(agg.values(), key=lambda d: d["online_s"], reverse=True)
+def report(devices, match=()):
+    shown = 0
     for d in devices:
         if match:
             hay = " ".join((d["mac"], d["ip"], d["name"])).lower()
@@ -258,8 +300,9 @@ def report(agg, match=()):
             print("  location    : node(s) %s" % ", ".join(d["nodes"]))
         if d["times_not_connected"]:
             print("  not-connected alerts: %d" % d["times_not_connected"])
+        shown += 1
     print("=" * 72)
-    print("%d device(s), sorted by time online (longest first)" % len(devices))
+    print("%d device(s), sorted by time online (longest first)" % shown)
 
 
 CSV_COLS = ["mac", "ip", "name", "vendor", "first_seen", "last_seen", "sessions",
@@ -269,18 +312,18 @@ CSV_COLS = ["mac", "ip", "name", "vendor", "first_seen", "last_seen", "sessions"
             "access_state", "blocked_times", "nodes", "times_not_connected"]
 
 
-def write_csv(agg, path):
+def write_csv(devices, path):
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_COLS, extrasaction="ignore")
         w.writeheader()
-        for d in sorted(agg.values(), key=lambda d: d["online_s"], reverse=True):
+        for d in devices:
             row = {c: d.get(c, "") for c in CSV_COLS}
             row["nodes"] = " ".join(d["nodes"])
             w.writerow(row)
 
 
 def main(argv):
-    folder, csv_path, flap, match = DEFAULT_DIR, None, FLAP_SECONDS, []
+    folder, csv_path, flap, match, show_all = DEFAULT_DIR, None, FLAP_SECONDS, [], False
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -293,16 +336,20 @@ def main(argv):
             i += 1; csv_path = argv[i] if i < len(argv) else None
         elif a == "--flap-seconds":
             i += 1; flap = int(argv[i]) if i < len(argv) else flap
+        elif a == "--all-devices":
+            show_all = True
         else:
             match.append(a)
         i += 1
     if not os.path.isdir(folder):
         print("no records folder: %s" % folder)
         return 1
-    agg = aggregate(load(folder), flap_seconds=flap)
-    report(agg, match=match)
+    rows = load(folder)
+    agg = aggregate(rows, flap_seconds=flap)
+    devices = select(agg, collect_station_ips(rows), show_all=show_all)
+    report(devices, match=match)
     if csv_path:
-        write_csv(agg, csv_path)
+        write_csv(devices, csv_path)
         print("feature table written to %s" % csv_path)
     return 0
 
