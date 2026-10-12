@@ -80,9 +80,15 @@ python3 device_report.py --csv ~/features.csv   # build the feature table
 python3 anomaly_model.py ~/features.csv          # flag the odd device(s)
 ```
 
+- `trend_model.py` — **per-device-over-time**: one feature row per device per
+  day, scores each device's latest day against ITS OWN prior days (robust
+  median/MAD, high side only), so a device is flagged when it deviates from
+  itself — not for merely differing from the others. A flat baseline broken
+  upward (e.g. a first-ever block) is flagged too. Needs `--min-days`+1 days of
+  history per device; reuses anomaly_model's math. Also in `ask.py` as `trend`.
+
 Model roadmap (all classical, all local):
-- score a device against its OWN history over time (not just against peers),
-  which is the stronger signal once more data accumulates;
+- DONE: score a device against its OWN history over time (`trend_model.py`).
 - once the three "next" features land (speed impact, per-node usage, download
   that affects the system), they become model inputs too;
 - optional upgrade to scikit-learn (IsolationForest / clustering) if installed,

@@ -38,9 +38,12 @@ Components (all committed and pushed):
   - **`device_report.py`** — per‑device feature report; `--csv` writes the
     feature table. Drops infra/non‑devices, caps rate glitches.
   - **`history.py`** — time‑ordered activity log of meaningful events.
-  - **`anomaly_model.py`** — offline robust (median/MAD) anomaly detector,
-    high‑side only, names the reasons. Pure stdlib; `fit()/score()` is a
-    drop‑in slot for scikit‑learn later.
+  - **`anomaly_model.py`** — offline robust (median/MAD) anomaly detector
+    (cross‑device), high‑side only, names the reasons. Pure stdlib;
+    `fit()/score()` is a drop‑in slot for scikit‑learn later.
+  - **`trend_model.py`** — per‑device‑over‑time: scores each device's latest
+    day against its OWN history, so a device is flagged for deviating from
+    itself (not for differing from peers). In `ask.py` as `trend`.
   - **`report_mailer.py`** + `systemd/report-mailer.{service,timer}` —
     scheduled build + email of the reports.
   - **`ask.py`** — offline command terminal to query/command the model.
@@ -139,10 +142,10 @@ if not yet done).
    autoconnect with priority, and disable autoconnect on the other saved SSID.
 
 **Model roadmap (all classical, all local):**
-4. **Per‑device‑over‑time model** — score each device against *its own* history
-   (one feature row per device per day via a `--daily` mode in
-   `device_report.py`), so the Pi isn't flagged for being the Pi and a phone is
-   flagged when it deviates from itself. This is the real fix for small samples.
+4. ~~Per‑device‑over‑time model~~ **DONE** — `trend_model.py` (and `ask.py
+   trend`): each device vs its own daily history. Next for it: fold in the
+   three features below as daily inputs, and wire a `trend` flag into the
+   mailer alongside the cross‑device scan.
 5. **The three remaining framework features** (in `REQUIREMENTS.md`): internet
    **speed impact** (bin time, attribute high‑latency minutes to the top talker),
    **location↔usage** (per‑node byte split), and **download‑affects‑system**

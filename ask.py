@@ -16,8 +16,9 @@ COMMANDS (plain phrasing with these words works too):
   data [device]               data usage, biggest first
   browsing <device>           the sites a device looked up
   device <device>             everything on one device
-  anomalies [threshold]       the model's scan: who stands out, and why
-  flagged [threshold]         only the devices the model flags
+  anomalies [threshold]       cross-device scan: who stands out, and why
+  flagged [threshold]         only the devices the cross-device model flags
+  trend [threshold]           per-device vs its OWN history: who's abnormal today
   history [device]            recent activity events
   email [all]                 TASK: build the report and email it now
                               (default only if a device is flagged; 'all' = always)
@@ -145,6 +146,15 @@ def cmd_scan(ctx, arg, flagged_only=False):
     return "\n".join(out) if len(out) > 1 else "no devices to score."
 
 
+def cmd_trend(ctx, arg):
+    import trend_model
+    try:
+        th = float(arg) if arg else anomaly_model.THRESHOLD
+    except ValueError:
+        th = anomaly_model.THRESHOLD
+    return capture(trend_model.main, ["--dir", ctx.folder, "--threshold", str(th)])
+
+
 def cmd_history(ctx, who, n=25):
     evs = history.events(ctx.rows, match=[who] if who else ())
     if not evs:
@@ -185,6 +195,8 @@ def handle(line, ctx):
     if word in ("reload", "refresh"):
         ctx.reload()
         return "reloaded: %d device(s) from %s" % (len(ctx.devices), ctx.folder)
+    if word == "trend" or "trend" in low or "over time" in low or "its own" in low:
+        return cmd_trend(ctx, rest)
     if "anomal" in low or word in ("scan", "model"):
         return cmd_scan(ctx, rest)
     if "flag" in low:

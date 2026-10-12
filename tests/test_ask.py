@@ -86,6 +86,18 @@ print("\nbrowsing:")
 check("browsing needs a device", "which device" in H("browsing"))
 check("browsing a device names the site", "youtube.com" in H("browsing 135"))
 
+print("\ntrend command is wired to trend_model:")
+import trend_model
+real_tm = trend_model.main
+trend_model.main = lambda argv: print("trend called; args=%s" % argv)
+try:
+    out = H("trend")
+    check("'trend' routes to trend_model with the dir", "trend called" in out and "--dir" in out)
+    out2 = H("is iphone abnormal over time")
+    check("'over time' phrasing also routes to trend", "trend called" in out2)
+finally:
+    trend_model.main = real_tm
+
 print("\nanomalies / flagged:")
 check("anomalies scans and scores", "Model scan" in H("anomalies"))
 cf = make_ctx(flagged=True)
