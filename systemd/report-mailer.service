@@ -8,6 +8,5 @@ Type=oneshot
 # adjust User and paths to match your install
 User=bravofox
 WorkingDirectory=/home/bravofox/theSaud
-# --only-flagged (default here) emails only when the model flags a device, so
-# the inbox and the mail account stay healthy. Remove it to email every run.
-ExecStart=/usr/bin/python3 /home/bravofox/theSaud/report_mailer.py --only-flagged --dir /home/bravofox/mesh_records --env /home/bravofox/.streamwatch_env
+# Emails every run. Add to email only when the model flags a device.
+ExecStart=/usr/bin/python3 /home/bravofox/theSaud/report_mailer.py --dir /home/bravofox/mesh_records --env /home/bravofox/.streamwatch_env

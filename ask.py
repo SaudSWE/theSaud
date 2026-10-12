@@ -9,6 +9,7 @@ conversation. Classical and deterministic, which is the point.
   ask.py                      open the interactive terminal
   ask.py anomalies            run one command and exit (scriptable)
   ask.py "data iphone"        quoting lets a command take arguments
+  ask.py --hours 6 flagged    judge only the last 6 h (default 24; 0 = all time)
 
 COMMANDS (plain phrasing with these words works too):
   help                        this list
@@ -16,13 +17,14 @@ COMMANDS (plain phrasing with these words works too):
   data [device]               data usage, biggest first
   browsing <device>           the sites a device looked up
   device <device>             everything on one device
-  anomalies [threshold]       cross-device scan: who stands out, and why
-  flagged [threshold]         only the devices the cross-device model flags
+  anomalies [threshold]       Eagle-Eye's cross-device scan: who stands out, and why
+  flagged [threshold]         only the devices Eagle-Eye flags
   trend [threshold]           per-device vs its OWN history: who's abnormal today
   threats                     fast log in/out + unknown entrances, flagged
   history [device]            recent activity events
   email [all]                 TASK: build the report and email it now
                               (default only if a device is flagged; 'all' = always)
+  window <hours|all>          look at the last N hours (default 24) or all time
   reload                      re-read the data from disk
   quit                        leave
 
@@ -36,20 +38,22 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import device_report          # noqa: E402
-import anomaly_model          # noqa: E402
+import eagle_eye          # noqa: E402
 import history                # noqa: E402
 
 DEFAULT_DIR = os.path.expanduser("~/mesh_records")
+HOURS = 24                 # default window; 0 = all time
 
 
 class Context:
-    def __init__(self, folder):
+    def __init__(self, folder, hours=HOURS):
         self.folder = folder
+        self.hours = hours
         self.reload()
 
     def reload(self):
         self.rows = device_report.load(self.folder)
-        self.agg = device_report.aggregate(self.rows)
+        self.agg = device_report.aggregate(self.rows, since=device_report.since_hours(self.hours))
         self.stations = device_report.collect_station_ips(self.rows)
         self.devices = device_report.select(self.agg, self.stations)
 
@@ -129,19 +133,21 @@ def cmd_device(ctx, who):
 
 def cmd_scan(ctx, arg, flagged_only=False):
     try:
-        th = float(arg) if arg else anomaly_model.THRESHOLD
+        th = float(arg) if arg else eagle_eye.THRESHOLD
     except ValueError:
-        th = anomaly_model.THRESHOLD
-    ranked, _ = anomaly_model.rank(ctx.devices, threshold=th)
+        th = eagle_eye.THRESHOLD
+    ranked, _ = eagle_eye.rank(ctx.devices, threshold=th)
     if flagged_only:
         ranked = [d for d in ranked if d["anomaly"]]
         if not ranked:
             return "nothing flagged at %.1f sigma -- all devices look normal." % th
-    out = ["Model scan (threshold %.1f sigma):" % th]
+    out = ["%s scan (%s, threshold %.1f sigma):" % (eagle_eye.NAME, device_report.window_label(ctx.hours), th)]
     for d in ranked:
-        mark = "  !! FLAGGED" if d["anomaly"] else ""
+        mark = "  !! THREAT" if d["threats"] else "  !! FLAGGED" if d["anomaly"] else ""
         out.append("  %-16s %-15s score %5.2f%s" %
                    (d["name"] or d["mac"], d["ip"] or d["mac"], d["score"], mark))
+        for t in d["threats"]:
+            out.append("        ! %s" % t)
         for col, z in d["reasons"][:3]:
             out.append("        - %s high (%.1f sigma)" % (col, z))
     return "\n".join(out) if len(out) > 1 else "no devices to score."
@@ -155,9 +161,9 @@ def cmd_threats(ctx, arg):
 def cmd_trend(ctx, arg):
     import trend_model
     try:
-        th = float(arg) if arg else anomaly_model.THRESHOLD
+        th = float(arg) if arg else eagle_eye.THRESHOLD
     except ValueError:
-        th = anomaly_model.THRESHOLD
+        th = eagle_eye.THRESHOLD
     return capture(trend_model.main, ["--dir", ctx.folder, "--threshold", str(th)])
 
 
@@ -171,7 +177,7 @@ def cmd_history(ctx, who, n=25):
 def cmd_email(ctx, arg):
     import report_mailer
     only_flagged = not (arg and arg.lower() in ("all", "always", "force"))
-    args = ["--dir", ctx.folder] + (["--only-flagged"] if only_flagged else [])
+    args = ["--dir", ctx.folder, "--hours", str(ctx.hours)] + (["--only-flagged"] if only_flagged else [])
     return capture(report_mailer.main, args)
 
 
@@ -198,6 +204,16 @@ def handle(line, ctx):
         return HELP
     if word in ("quit", "exit", "q", "bye"):
         return None
+    if word in ("window", "last", "since"):
+        if rest.lower() in ("all", "0", "ever"):
+            ctx.hours = 0
+        else:
+            try:
+                ctx.hours = float(rest.lower().rstrip("h"))
+            except ValueError:
+                return "usage: window <hours>  or  window all   (now: %s)" % device_report.window_label(ctx.hours)
+        ctx.reload()
+        return "window: %s -- %d device(s)" % (device_report.window_label(ctx.hours), len(ctx.devices))
     if word in ("reload", "refresh"):
         ctx.reload()
         return "reloaded: %d device(s) from %s" % (len(ctx.devices), ctx.folder)
@@ -226,16 +242,18 @@ def handle(line, ctx):
 
 
 def main(argv):
-    folder = DEFAULT_DIR
+    folder, hours = DEFAULT_DIR, HOURS
     rest = []
     i = 0
     while i < len(argv):
         if argv[i] == "--dir" and i + 1 < len(argv):
             folder = argv[i + 1]; i += 2; continue
+        if argv[i] == "--hours" and i + 1 < len(argv):
+            hours = float(argv[i + 1]); i += 2; continue
         rest.append(argv[i]); i += 1
     if not os.path.isdir(folder):
         print("no records folder: %s" % folder); return 1
-    ctx = Context(folder)
+    ctx = Context(folder, hours)
 
     if rest:                               # one-shot mode
         out = handle(" ".join(rest), ctx)
@@ -243,8 +261,8 @@ def main(argv):
             print(out)
         return 0
 
-    print("StreamWatch offline terminal -- %d device(s) loaded. Type 'help', 'quit' to leave."
-          % len(ctx.devices))
+    print("StreamWatch offline terminal -- %d device(s), %s. Type 'help', 'quit' to leave."
+          % (len(ctx.devices), device_report.window_label(ctx.hours)))
     while True:
         try:
             line = input("ask> ")

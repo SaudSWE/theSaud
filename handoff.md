@@ -38,7 +38,7 @@ Components (all committed and pushed):
   - **`device_report.py`** — per‑device feature report; `--csv` writes the
     feature table. Drops infra/non‑devices, caps rate glitches.
   - **`history.py`** — time‑ordered activity log of meaningful events.
-  - **`anomaly_model.py`** — offline robust (median/MAD) anomaly detector
+  - **`eagle_eye.py`** — offline robust (median/MAD) anomaly detector
     (cross‑device), high‑side only, names the reasons. Pure stdlib;
     `fit()/score()` is a drop‑in slot for scikit‑learn later.
   - **`trend_model.py`** — per‑device‑over‑time: scores each device's latest
@@ -66,7 +66,7 @@ configured + tracker running), **Adblocker** is the user's other team,
   `pgrep` returned nothing, i.e. it may be **down**. See Next Steps.
 
 **On‑demand (run by hand / scriptable), not services:**
-- `device_report.py`, `history.py`, `anomaly_model.py`, `ask.py`.
+- `device_report.py`, `history.py`, `eagle_eye.py`, `ask.py`.
 - The anomaly model only scores when invoked (by you or by the mailer); it is
   not a background process.
 
@@ -81,8 +81,8 @@ Run the terminal: `cd ~/theSaud && python3 ask.py` (or `python3 ask.py online`).
 - `report-mailer` safe defaults — `--only-flagged`, every 15 min (was minutely).
 - `report_mailer.py` + systemd units — scheduled build+email of the reports,
   creds from an env file, `--dry-run`/`--only-flagged`/`--to`. 16 tests.
-- `anomaly_model.py` — high‑side‑only scoring (a quiet device is not an anomaly).
-- `anomaly_model.py` — first classical‑ML model: robust median/MAD anomaly
+- `eagle_eye.py` — high‑side‑only scoring (a quiet device is not an anomaly).
+- `eagle_eye.py` — first classical‑ML model: robust median/MAD anomaly
   detector, log‑scaled heavy‑tailed features, explainable reasons. 20 tests.
 - `device_report.py` — filter infra/non‑devices (loopback, .0/.255, node
   self‑traffic, null/multicast MACs, zero‑signal), normalize comma‑MAC, cap
@@ -153,8 +153,8 @@ if not yet done).
 6. **Rotating‑MAC stitching** — one iPhone shows up as several identities
    (private MAC). Stitch by vendor + timing, or document turning off "Private
    Wi‑Fi Address" per device.
-7. Optional: upgrade `anomaly_model.py` to scikit‑learn IsolationForest behind
+7. Optional: upgrade `eagle_eye.py` to scikit‑learn IsolationForest behind
    the existing `fit()/score()` interface (only if sklearn is installed).
 
 **How to pick back up:** `cd ~/theSaud && git pull`, then
-`python3 ask.py` (interactive) or `python3 device_report.py --csv ~/features.csv && python3 anomaly_model.py ~/features.csv`.
+`python3 ask.py` (interactive) or `python3 device_report.py --csv ~/features.csv && python3 eagle_eye.py ~/features.csv`.

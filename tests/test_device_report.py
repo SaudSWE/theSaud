@@ -47,6 +47,9 @@ check("durations 300, 5, 500", [b - a for a, b in sess] == [300, 5, 500])
 
 check("device online before recording (leading 'out') counts from first sight",
       dr.sessionize([(50, "out")], end_fallback=50) == [(50, 50)])
+check("repeated 'out' while offline adds no overlapping session",
+      dr.sessionize([(0, "in"), (100, "out"), (200, "out"), (300, "out")],
+                    end_fallback=300) == [(0, 100)])
 
 print("\naggregate across record types (keyed on MAC):")
 rows = [
@@ -81,6 +84,36 @@ pi = agg[PI]
 check("pi: missing then back = 1 not-connected alert", pi["times_not_connected"] == 1)
 check("pi: online before going missing counted, the missing gap excluded",
       pi["online_s"] == 200 and pi["sessions"] == 2)
+
+
+print("\ntime window (since): counts only recent rows, clips sessions:")
+w = dr.aggregate(rows, since=1250)
+wp, wpi = w[PHONE], w[PI]
+check("session clipped to window (1250->1600 = 350 s)", wp["online_s"] == 350 and wp["sessions"] == 1)
+check("rows before the window not counted", wp["bytes_total"] == 0 and wp["dns_queries"] == 0
+      and wp["large_flows"] == 0)
+check("rows inside the window counted", wp["access_state"] == "GRANTED" and wp["nodes"] == ["L1"])
+check("missing before the window not counted", wpi["times_not_connected"] == 0)
+on = dr.aggregate([row("tracker_event", 0, category="ARRIVED", device_mac=PI),
+                   row("device_traffic", 5000, device_mac=PI, bytes_in=1)], since=4000)
+check("online since before the window counts from window start", on[PI]["online_s"] == 1000)
+check("no window = all time (unchanged)", dr.aggregate(rows, since=None)[PHONE]["online_s"] == 600)
+check("device first seen before the window is not new", wp["new_device"] == 0)
+nw = dr.aggregate([row("tracker_event", 5000, category="ARRIVED", device_mac=PHONE)], since=4000)
+check("device first seen inside the window is new", nw[PHONE]["new_device"] == 1)
+check("no window -> nothing is 'new'", dr.aggregate(rows)[PHONE]["new_device"] == 0)
+br = dr.aggregate([row("tracker_event", t, category=c, device_mac=PI) for t, c in
+                   [(0, "ARRIVED"), (10, "LEFT"), (20, "ARRIVED"), (25, "LEFT"),
+                    (5000, "ARRIVED"), (5030, "LEFT"), (9000, "ARRIVED")]])
+check("burst = fast in/outs within 10 min (2), not the day's total (3)",
+      br[PI]["fast_flaps"] == 3 and br[PI]["flap_burst"] == 2)
+wl = dr.aggregate([row("router_log", 100, device_mac=PI, link_state="AP-STA-CONNECTED"),
+                   row("router_log", 116, device_mac=PI, link_state="AP-STA-DISCONNECTED")])
+check("router Wi-Fi connect/disconnect counts as a session", wl[PI]["sessions"] == 1
+      and wl[PI]["online_s"] == 16 and wl[PI]["fast_flaps"] == 1)
+check("a device that just connected (still online) is not a fast in/out",
+      dr.aggregate([row("tracker_event", 50, category="ARRIVED", device_mac=PI)])[PI]["fast_flaps"] == 0)
+check("since_hours(0) = all time", dr.since_hours(0) is None and dr.window_label(0) == "all time")
 
 print("\nfast in/out (flapping) flagged by threshold:")
 flappy = [row("tracker_event", 100, category="ARRIVED", device_mac=PHONE),
@@ -162,6 +195,27 @@ check("load drops the mid-file header, keeps both data rows",
 print("\nhelpers:")
 check("human bytes", dr.human(1536) == "1.5 KB")
 check("human duration", dr.human_dur(3660) == "1 h 1 min")
+
+print("\nend to end: phone drops Wi-Fi twice in a minute -> model says THREAT:")
+spec = importlib.util.spec_from_file_location("am", os.path.join(HERE, "..", "eagle_eye.py"))
+am = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(am)
+
+
+def ap(epoch, state):
+    return row("router_log", epoch, link_state="AP-STA-" + state, device_mac=PHONE, device_name="iPhone")
+
+
+# online an hour, then off/on twice within ~20 s, then stays on
+flaps = [ap(0, "CONNECTED"), ap(3600, "DISCONNECTED"), ap(3605, "CONNECTED"),
+         ap(3610, "DISCONNECTED"), ap(3615, "CONNECTED"), ap(3620, "DISCONNECTED"),
+         ap(3625, "CONNECTED"), ap(7200, "DISCONNECTED")]
+ranked, _ = am.rank(list(dr.aggregate(flaps).values()))
+check("raw AP-STA flaps -> THREAT on the phone",
+      ranked[0]["mac"] == PHONE and any("sudden log-ins" in t for t in ranked[0]["threats"]))
+calm_phone = [ap(0, "CONNECTED"), ap(3600, "DISCONNECTED"), ap(4000, "CONNECTED"), ap(7200, "DISCONNECTED")]
+check("one normal reconnect -> no threat",
+      not am.rank(list(dr.aggregate(calm_phone).values()))[0][0]["threats"])
 
 print("\n%d passed, %d failed" % (PASS[0], FAIL[0]))
 sys.exit(1 if FAIL[0] else 0)

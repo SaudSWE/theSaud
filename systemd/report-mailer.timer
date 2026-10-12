@@ -2,11 +2,9 @@
 Description=Run the StreamWatch report mailer on a schedule
 
 [Timer]
-# Every 15 minutes. Paired with --only-flagged in the service, an email goes
-# out only when a device is flagged, so this cadence costs nothing when quiet.
-# For more/less often: OnCalendar=minutely (WARNING: ~1440/day suspends a free
-# Gmail account), *:0/5 (5 min), or hourly.
-OnCalendar=*:0/15
+# Every 5 minutes, every run (~288 emails/day; free Gmail caps sending near
+# 500/day). For less: *:0/15 or hourly. minutely (~1440/day) gets suspended.
+OnCalendar=*:0/5
 Persistent=false
 AccuracySec=15s
 

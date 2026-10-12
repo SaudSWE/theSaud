@@ -32,6 +32,7 @@ NOT yet computed here (need a time-join or host-level data -- see REQUIREMENTS):
     python3 device_report.py 192.168.8.135   # one device (ip, mac or name)
     python3 device_report.py --csv feats.csv  # also write a per-device feature table
     python3 device_report.py --dir /path/to/mesh_records --flap-seconds 120
+    python3 device_report.py --hours 24      # only the last 24 h (default: all time)
 """
 import csv
 import glob
@@ -39,11 +40,13 @@ import gzip
 import os
 import re
 import sys
+import time
 from collections import Counter, defaultdict
 
 DEFAULT_DIR = os.path.expanduser("~/mesh_records")
 BIG_FLOW = 10 * 1024 * 1024          # 10 MB: "large" transfer
 FLAP_SECONDS = 120                   # a session shorter than this is a fast in/out
+BURST_SECONDS = 600                  # fast in/outs this close together form a burst
 RATE_CEILING_KBPS = 2_000_000        # 2 Gbps: above this a rate sample is a
 #   counter-reset glitch (delta over a near-zero interval), not real throughput
 MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
@@ -120,6 +123,15 @@ def load(folder):
     return rows
 
 
+def since_hours(hours):
+    """Epoch at the start of a last-N-hours window; None (all-time) if hours <= 0."""
+    return time.time() - hours * 3600 if hours and hours > 0 else None
+
+
+def window_label(hours):
+    return "last %g h" % hours if hours and hours > 0 else "all time"
+
+
 def sessionize(events, end_fallback):
     """events: (epoch, 'in'|'out') for one device, already time-sorted.
     Returns a list of (start, end) online intervals. A device already online
@@ -134,8 +146,10 @@ def sessionize(events, end_fallback):
                 start = t
         else:  # out
             if start is None:
-                # was online before we first saw an 'in': count from the start
-                sessions.append((first, t))
+                # was online before we first saw an 'in': count from the start,
+                # but only once -- a repeated 'out' while offline adds nothing
+                if not sessions:
+                    sessions.append((first, t))
             else:
                 sessions.append((start, t))
                 start = None
@@ -144,7 +158,10 @@ def sessionize(events, end_fallback):
     return [(a, b) for a, b in sessions if b >= a]
 
 
-def aggregate(rows, flap_seconds=FLAP_SECONDS):
+def aggregate(rows, flap_seconds=FLAP_SECONDS, since=None):
+    """Per-device features. since (epoch) limits counts to rows at/after it;
+    presence is still read from all rows so a device already online when the
+    window opens is counted from 'since', not dropped."""
     ident = {}                       # key -> {ip,name,vendor}
     presence = defaultdict(list)     # key -> [(epoch,'in'/'out')]
     bytes_in = Counter()
@@ -158,6 +175,8 @@ def aggregate(rows, flap_seconds=FLAP_SECONDS):
     nodes = defaultdict(set)
     missing_n = Counter()
     first_seen, last_seen = {}, {}
+    last_any = {}                    # last sighting at any time: closes open sessions
+    first_any = {}                   # first sighting ever: is it new in this window?
 
     for r in rows:
         k = key_of(r)
@@ -167,8 +186,8 @@ def aggregate(rows, flap_seconds=FLAP_SECONDS):
         t = epoch_of(r)
         if t is None:
             continue
-        first_seen.setdefault(k, t)
-        last_seen[k] = t
+        last_any[k] = t
+        first_any.setdefault(k, t)
         d = ident.setdefault(k, {"ip": "", "name": "", "vendor": ""})
         if r.get("device_ip"):
             d["ip"] = r["device_ip"]
@@ -177,11 +196,19 @@ def aggregate(rows, flap_seconds=FLAP_SECONDS):
         if r.get("device_vendor"):
             d["vendor"] = r["device_vendor"]
 
+        inside = since is None or t >= since
         if rt == "tracker_event":
             cat = (r.get("category") or "").upper()
             if cat == "ARRIVED":
                 presence[k].append((t, "in"))
             elif cat == "LEFT":
+                presence[k].append((t, "out"))
+        elif rt == "router_log":
+            # the AP's own association events: to the second, unlike the tracker
+            ls = r.get("link_state") or ""
+            if ls == "AP-STA-CONNECTED":
+                presence[k].append((t, "in"))
+            elif ls == "AP-STA-DISCONNECTED":
                 presence[k].append((t, "out"))
         elif rt == "malfunction":
             cat = (r.get("category") or "")
@@ -189,8 +216,13 @@ def aggregate(rows, flap_seconds=FLAP_SECONDS):
                 presence[k].append((t, "in"))
             elif cat == "device_missing":
                 presence[k].append((t, "out"))
-                missing_n[k] += 1
-        elif rt == "device_traffic":
+                if inside:
+                    missing_n[k] += 1
+        if not inside:
+            continue
+        first_seen.setdefault(k, t)
+        last_seen[k] = t
+        if rt == "device_traffic":
             bytes_in[k] += num(r, "bytes_in")
             bytes_out[k] += num(r, "bytes_out")
             for v in (num(r, "rate_in_kbps"), num(r, "rate_out_kbps")):
@@ -215,8 +247,13 @@ def aggregate(rows, flap_seconds=FLAP_SECONDS):
 
     out = {}
     for k in ident:
-        sess = sessionize(presence.get(k, []), last_seen.get(k, 0))
+        sess = sessionize(presence.get(k, []), last_any.get(k, 0))
+        if since is not None:        # clip sessions to the window
+            sess = [(max(a, since), b) for a, b in sess if b >= since]
         durs = [b - a for a, b in sess]
+        ev = presence.get(k, [])
+        done = sess[:-1] if ev and ev[-1][1] == "in" else sess   # still online: not a flap yet
+        fast = [a for a, b in done if b - a < flap_seconds]
         out[k] = {
             "mac": k, "ip": ident[k]["ip"], "name": ident[k]["name"],
             "vendor": ident[k]["vendor"],
@@ -224,7 +261,10 @@ def aggregate(rows, flap_seconds=FLAP_SECONDS):
             "sessions": len(sess),
             "online_s": int(sum(durs)),
             "longest_session_s": int(max(durs)) if durs else 0,
-            "fast_flaps": sum(1 for x in durs if x < flap_seconds),
+            "fast_flaps": len(fast),
+            # most fast in/outs inside any BURST_SECONDS span: sudden log-ins
+            "flap_burst": max((sum(1 for y in fast if x <= y < x + BURST_SECONDS)
+                               for x in fast), default=0),
             "bytes_in": int(bytes_in[k]), "bytes_out": int(bytes_out[k]),
             "bytes_total": int(bytes_in[k] + bytes_out[k]),
             "peak_rate_kbps": round(peak_rate[k], 1),
@@ -238,6 +278,7 @@ def aggregate(rows, flap_seconds=FLAP_SECONDS):
             "blocked_times": block_n[k],
             "nodes": sorted(nodes[k]),
             "times_not_connected": missing_n[k],
+            "new_device": int(since is not None and first_any[k] >= since),
         }
     return out
 
@@ -309,7 +350,8 @@ CSV_COLS = ["mac", "ip", "name", "vendor", "first_seen", "last_seen", "sessions"
             "online_s", "longest_session_s", "fast_flaps", "bytes_in", "bytes_out",
             "bytes_total", "peak_rate_kbps", "dns_queries", "distinct_domains",
             "biggest_flow_bytes", "biggest_flow_service", "large_flows",
-            "access_state", "blocked_times", "nodes", "times_not_connected"]
+            "access_state", "blocked_times", "nodes", "times_not_connected",
+            "new_device", "flap_burst"]
 
 
 def write_csv(devices, path):
@@ -324,6 +366,7 @@ def write_csv(devices, path):
 
 def main(argv):
     folder, csv_path, flap, match, show_all = DEFAULT_DIR, None, FLAP_SECONDS, [], False
+    hours = 0
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -336,6 +379,8 @@ def main(argv):
             i += 1; csv_path = argv[i] if i < len(argv) else None
         elif a == "--flap-seconds":
             i += 1; flap = int(argv[i]) if i < len(argv) else flap
+        elif a == "--hours":
+            i += 1; hours = float(argv[i]) if i < len(argv) else hours
         elif a == "--all-devices":
             show_all = True
         else:
@@ -345,7 +390,8 @@ def main(argv):
         print("no records folder: %s" % folder)
         return 1
     rows = load(folder)
-    agg = aggregate(rows, flap_seconds=flap)
+    agg = aggregate(rows, flap_seconds=flap, since=since_hours(hours))
+    print("Window: %s" % window_label(hours))
     devices = select(agg, collect_station_ips(rows), show_all=show_all)
     report(devices, match=match)
     if csv_path:

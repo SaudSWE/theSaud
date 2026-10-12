@@ -69,14 +69,14 @@ check("comment and junk lines ignored", "bad line" not in env and "#" not in "".
 check("missing file -> empty dict", rm.load_env("/no/such/file") == {})
 
 print("\nbuild_report assembles both reports and counts flags:")
-body, flagged = rm.build_report(make_records(flagged=False))
+body, flagged = rm.build_report(make_records(flagged=False), hours=0)
 check("device report section present", "device(s), sorted by time online" in body)
-check("anomaly section present", "Anomaly scan" in body)
+check("anomaly section present", "Eagle-Eye (EE1) scan" in body)
 check("header with build time + recorder status", "StreamWatch device report" in body
       and "Recorder:" in body)
 check("no device flagged in the quiet set", flagged == 0)
 
-body2, flagged2 = rm.build_report(make_records(flagged=True), threshold=4.0)
+body2, flagged2 = rm.build_report(make_records(flagged=True), threshold=4.0, hours=0)
 check("the extreme device is flagged and counted", flagged2 >= 1 and "ANOMALY" in body2)
 
 print("\n--only-flagged gates sending:")
@@ -91,17 +91,17 @@ def fake_send(subject, bodytext, env, retries=()):
 rm.send_email, real_send = fake_send, rm.send_email
 try:
     quiet = make_records(flagged=False)
-    rc = rm.main(["--dir", quiet, "--only-flagged", "--env", ef])
+    rc = rm.main(["--hours", "0", "--dir", quiet, "--only-flagged", "--env", ef])
     check("quiet + --only-flagged -> nothing sent", rc == 0 and sent == [])
 
     loud = make_records(flagged=True)
-    rc = rm.main(["--dir", loud, "--only-flagged", "--env", ef, "--to", "admin@x"])
+    rc = rm.main(["--hours", "0", "--dir", loud, "--only-flagged", "--env", ef, "--to", "admin@x"])
     check("a flag -> one email sent", len(sent) == 1)
     check("subject marks the flag count", "FLAGGED" in sent[0][0])
     check("--to overrides the recipient (body built, mail attempted)", True)
 
     sent.clear()
-    rc = rm.main(["--dir", quiet, "--env", ef])
+    rc = rm.main(["--hours", "0", "--dir", quiet, "--env", ef])
     check("without --only-flagged a quiet run still sends", len(sent) == 1)
 finally:
     rm.send_email = real_send
@@ -110,7 +110,7 @@ print("\n--dry-run never sends:")
 sent.clear()
 rm.send_email, real_send = fake_send, rm.send_email
 try:
-    rc = rm.main(["--dir", make_records(flagged=True), "--dry-run", "--env", ef])
+    rc = rm.main(["--hours", "0", "--dir", make_records(flagged=True), "--dry-run", "--env", ef])
     check("dry-run returns 0 and sends nothing", rc == 0 and sent == [])
 finally:
     rm.send_email = real_send

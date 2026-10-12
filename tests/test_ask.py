@@ -50,7 +50,7 @@ def make_ctx(flagged=False):
         w.writeheader()
         for r in rows:
             w.writerow({**{c: "" for c in cols}, **r})
-    return ask.Context(d)
+    return ask.Context(d, hours=0)   # fixtures are old: judge all time
 
 
 ctx = make_ctx()
@@ -99,7 +99,7 @@ finally:
     trend_model.main = real_tm
 
 print("\nanomalies / flagged:")
-check("anomalies scans and scores", "Model scan" in H("anomalies"))
+check("anomalies scans and scores", "Eagle-Eye (EE1) scan" in H("anomalies"))
 cf = make_ctx(flagged=True)
 check("flagged shows the outlier when one exists",
       "FLAGGED" in ask.handle("flagged", cf))
@@ -130,7 +130,7 @@ print("\none-shot mode:")
 import io, contextlib
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
-    rc = ask.main(["--dir", ctx.folder, "online"])
+    rc = ask.main(["--hours", "0", "--dir", ctx.folder, "online"])
 check("ask.py <command> runs once and exits 0", rc == 0 and "Time online" in buf.getvalue())
 
 print("\n%d passed, %d failed" % (PASS[0], FAIL[0]))

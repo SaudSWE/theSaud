@@ -66,7 +66,7 @@ the network (PRV). First model shipped: a robust anomaly detector.
   file transfer, sessions/flaps, location, access), sorted longest-online
   first; `--csv` writes a per-device feature table for the model.
 - `history.py` — the time-ordered activity log of meaningful events.
-- `anomaly_model.py` — reads the feature table, learns each feature's median
+- `eagle_eye.py` — reads the feature table, learns each feature's median
   and MAD across devices (robust: the outliers don't skew the baseline),
   log-scales heavy-tailed features, and scores every device by its most
   extreme robust z-score; past `--threshold` it is flagged, with the features
@@ -77,7 +77,7 @@ the network (PRV). First model shipped: a robust anomaly detector.
 Pipeline:
 ```
 python3 device_report.py --csv ~/features.csv   # build the feature table
-python3 anomaly_model.py ~/features.csv          # flag the odd device(s)
+python3 eagle_eye.py ~/features.csv          # flag the odd device(s)
 ```
 
 - `trend_model.py` — **per-device-over-time**: one feature row per device per
@@ -85,7 +85,7 @@ python3 anomaly_model.py ~/features.csv          # flag the odd device(s)
   median/MAD, high side only), so a device is flagged when it deviates from
   itself — not for merely differing from the others. A flat baseline broken
   upward (e.g. a first-ever block) is flagged too. Needs `--min-days`+1 days of
-  history per device; reuses anomaly_model's math. Also in `ask.py` as `trend`.
+  history per device; reuses eagle_eye's math. Also in `ask.py` as `trend`.
 
 Model roadmap (all classical, all local):
 - DONE: score a device against its OWN history over time (`trend_model.py`).
