@@ -19,6 +19,7 @@ COMMANDS (plain phrasing with these words works too):
   anomalies [threshold]       cross-device scan: who stands out, and why
   flagged [threshold]         only the devices the cross-device model flags
   trend [threshold]           per-device vs its OWN history: who's abnormal today
+  threats                     fast log in/out + unknown entrances, flagged
   history [device]            recent activity events
   email [all]                 TASK: build the report and email it now
                               (default only if a device is flagged; 'all' = always)
@@ -146,6 +147,11 @@ def cmd_scan(ctx, arg, flagged_only=False):
     return "\n".join(out) if len(out) > 1 else "no devices to score."
 
 
+def cmd_threats(ctx, arg):
+    import threats
+    return capture(threats.main, ["--dir", ctx.folder])
+
+
 def cmd_trend(ctx, arg):
     import trend_model
     try:
@@ -195,6 +201,9 @@ def handle(line, ctx):
     if word in ("reload", "refresh"):
         ctx.reload()
         return "reloaded: %d device(s) from %s" % (len(ctx.devices), ctx.folder)
+    if ("threat" in low or "intrud" in low or "entrance" in low or "log in" in low
+            or "login" in low or "log out" in low or word in ("threats", "logins", "entrances")):
+        return cmd_threats(ctx, rest)
     if word == "trend" or "trend" in low or "over time" in low or "its own" in low:
         return cmd_trend(ctx, rest)
     if "anomal" in low or word in ("scan", "model"):
