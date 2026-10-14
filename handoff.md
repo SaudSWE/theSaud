@@ -1,7 +1,9 @@
 # StreamWatch Mesh Protection — Handoff
 
-Branch: `claude/location-tracking-forbidden-zones-ersaxf` · Last updated: 2026-10-12
-Tests: **388 passing** across 12 suites (pure stdlib, run with `python3 tests/test_*.py`).
+Branch: `claude/location-tracking-forbidden-zones-ersaxf` (PR #1 merged to `main`;
+new work is on this branch, rebased on `main`) · Last updated: 2026-10-14
+Tests: **415 passing** across 14 suites (pure stdlib, run with `python3 tests/test_*.py`).
+See also `README.md` (overview) and `ARCHITECTURE.md` (design).
 
 ---
 
@@ -44,6 +46,10 @@ Components (all committed and pushed):
   - **`trend_model.py`** — per‑device‑over‑time: scores each device's latest
     day against its OWN history, so a device is flagged for deviating from
     itself (not for differing from peers). In `ask.py` as `trend`.
+  - **`threats.py`** — flags **fast log in/out** (flapping) and **unknown
+    entrances** (a device held at the gate, on neither list), with a recent‑
+    arrival note; a known allowed device simply arriving is not flagged. In
+    `ask.py` as `threats`.
   - **`report_mailer.py`** + `systemd/report-mailer.{service,timer}` —
     scheduled build + email of the reports.
   - **`ask.py`** — offline command terminal to query/command the model.
@@ -59,16 +65,20 @@ configured + tracker running), **Adblocker** is the user's other team,
 ## 3) Active Status (what is running vs on‑demand)
 
 **Running continuously on the hardware:**
-- Pi: **`mesh-recorder`** systemd service — confirmed **active** (writing the CSV).
-- Pi: **`report-mailer.timer`** — installed and enabled; now **every 15 min**
-  with **`--only-flagged`** (emails only when the model flags a device).
-- Gateway: **StreamWatch** (procd service) — **needs verification**: a recent
-  `pgrep` returned nothing, i.e. it may be **down**. See Next Steps.
+- Pi: **`mesh-recorder`** systemd service — **active** (writing the CSV).
+- Pi: **`report-mailer.timer`** — installed and enabled; **every 15 min** with
+  **`--only-flagged`** (emails only when the model flags a device).
+- Gateway: **StreamWatch** (procd service) — **active**, confirmed PID 4074
+  (`--email-alert --threshold 500M --accept-commands --group-lists`; malfunction
+  detection on by default).
 
 **On‑demand (run by hand / scriptable), not services:**
-- `device_report.py`, `history.py`, `anomaly_model.py`, `ask.py`.
-- The anomaly model only scores when invoked (by you or by the mailer); it is
-  not a background process.
+- `device_report.py`, `history.py`, `anomaly_model.py`, `trend_model.py`,
+  `threats.py`, `ask.py`.
+- The models only score when invoked (by you or by the mailer); none is a
+  background process.
+- Live note: iPhone‑178 currently shows as `HELD` (unknown entrance) — decide
+  allow/deny; `threats.py` surfaces it.
 
 Run the terminal: `cd ~/theSaud && python3 ask.py` (or `python3 ask.py online`).
 
@@ -76,6 +86,11 @@ Run the terminal: `cd ~/theSaud && python3 ask.py` (or `python3 ask.py online`).
 
 ## 4) Changes Made (this phase, newest first)
 
+- `README.md` + `ARCHITECTURE.md` — overview and design docs (six sections each).
+- `threats.py` — fast log in/out + unknown‑entrance flagging. 10 tests. In
+  `ask.py` as `threats` (and the phrasing "log in/out", "entrance", "intruder",
+  "threat" routes here).
+- `trend_model.py` — per‑device‑over‑time anomaly model. 15 tests. `ask.py trend`.
 - `ask.py` — offline terminal to the model (commands + keyword phrasing, device
   resolution, one‑shot mode). 24 tests.
 - `report-mailer` safe defaults — `--only-flagged`, every 15 min (was minutely).
@@ -127,34 +142,44 @@ if not yet done).
   → must restart dnsmasq after the log service (already in the recorder).
 - **A true conversational AI** over the data — not available: the team chose
   classical ML (no LLM), so `ask.py` is a command interpreter, not a chat bot.
+  Typing a full sentence keyword‑matches (e.g. "flag" ran the anomaly scan);
+  use the named commands.
+- **The Pi's `ask.py` is locally modified** (banner shows "last 24 h"; freeform
+  input prints the full report) — a local edit not in git. A `git pull` will
+  conflict on `ask.py`. Run the standalone tools (`python3 threats.py`,
+  `trend_model.py`, `device_report.py`) which are unaffected, or `git stash`
+  before pulling and reconcile.
 
 ---
 
 ## 6) Next Steps
 
 **Must‑do (operational):**
-1. **Verify StreamWatch on the gateway is up** (it may be down):
-   `ssh root@192.168.8.1 '/etc/init.d/streamwatch restart; sleep 3; pgrep -af streamwatch_v12 || echo NOT RUNNING'`
-   then `logread | grep -i streamwatch | tail -20` to see why it stopped.
+1. ~~Verify StreamWatch on the gateway is up~~ **DONE** — active, PID 4074.
 2. **Rotate the Gmail app password** (it was in old source and in chat); update
    `/root/.streamwatch_env` on the gateway and `~/.streamwatch_env` on the Pi.
 3. **Confirm the Pi won't leave the mesh on reboot** — set the mesh Wi‑Fi to
    autoconnect with priority, and disable autoconnect on the other saved SSID.
+4. **Reconcile the Pi's locally‑edited `ask.py`** (see Failed Attempts) so the
+   terminal gets the `trend`/`threats` commands; or just use the standalone tools.
+5. **Decide the `HELD` device** (iPhone‑178): `group_lists.py allow add …` or
+   `deny add …`.
 
 **Model roadmap (all classical, all local):**
-4. ~~Per‑device‑over‑time model~~ **DONE** — `trend_model.py` (and `ask.py
-   trend`): each device vs its own daily history. Next for it: fold in the
-   three features below as daily inputs, and wire a `trend` flag into the
-   mailer alongside the cross‑device scan.
-5. **The three remaining framework features** (in `REQUIREMENTS.md`): internet
+6. ~~Per‑device‑over‑time model~~ **DONE** — `trend_model.py` / `ask.py trend`.
+7. ~~Fast log in/out + unknown entrance flagging~~ **DONE** — `threats.py` /
+   `ask.py threats`.
+8. **The three remaining framework features** (in `REQUIREMENTS.md`): internet
    **speed impact** (bin time, attribute high‑latency minutes to the top talker),
    **location↔usage** (per‑node byte split), and **download‑affects‑system**
    (big inbound flow + a new `open_port` → overlaps board #12 Attack).
-6. **Rotating‑MAC stitching** — one iPhone shows up as several identities
+9. **Rotating‑MAC stitching** — one iPhone shows up as several identities
    (private MAC). Stitch by vendor + timing, or document turning off "Private
    Wi‑Fi Address" per device.
-7. Optional: upgrade `anomaly_model.py` to scikit‑learn IsolationForest behind
-   the existing `fit()/score()` interface (only if sklearn is installed).
+10. Optional: upgrade the models to scikit‑learn IsolationForest behind the
+    existing `fit()/score()` interface (only if sklearn is installed).
+11. Fold the `trend`/`threats` results into `report_mailer.py` so the scheduled
+    email includes them, not just the cross‑device scan.
 
 **How to pick back up:** `cd ~/theSaud && git pull`, then
 `python3 ask.py` (interactive) or `python3 device_report.py --csv ~/features.csv && python3 anomaly_model.py ~/features.csv`.
