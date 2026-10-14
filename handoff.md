@@ -40,7 +40,7 @@ Components (all committed and pushed):
   - **`device_report.py`** — per‑device feature report; `--csv` writes the
     feature table. Drops infra/non‑devices, caps rate glitches.
   - **`history.py`** — time‑ordered activity log of meaningful events.
-  - **`anomaly_model.py`** — offline robust (median/MAD) anomaly detector
+  - **`eagle_eye.py`** — offline robust (median/MAD) anomaly detector
     (cross‑device), high‑side only, names the reasons. Pure stdlib;
     `fit()/score()` is a drop‑in slot for scikit‑learn later.
   - **`trend_model.py`** — per‑device‑over‑time: scores each device's latest
@@ -74,11 +74,14 @@ configured + tracker running), **Adblocker** is the user's other team,
 
 **On‑demand (run by hand / scriptable), not services:**
 - `device_report.py`, `history.py`, `anomaly_model.py`, `trend_model.py`,
-  `threats.py`, `ask.py`.
+  `threats.py`, `eagle_eye.py`, `ask.py`.
 - The models only score when invoked (by you or by the mailer); none is a
   background process.
 - Live note: iPhone‑178 currently shows as `HELD` (unknown entrance) — decide
-  allow/deny; `threats.py` surfaces it.
+  allow/deny; `threats.py`/`eagle_eye.py` surface it.
+- **Overlap to reconcile:** `threats.py` (this session) and `eagle_eye.py`
+  (the parallel Eagle‑Eye track) both flag sudden/fast log‑in‑out as a threat.
+  Pick one, or merge them, before they drift.
 
 Run the terminal: `cd ~/theSaud && python3 ask.py` (or `python3 ask.py online`).
 
@@ -96,8 +99,8 @@ Run the terminal: `cd ~/theSaud && python3 ask.py` (or `python3 ask.py online`).
 - `report-mailer` safe defaults — `--only-flagged`, every 15 min (was minutely).
 - `report_mailer.py` + systemd units — scheduled build+email of the reports,
   creds from an env file, `--dry-run`/`--only-flagged`/`--to`. 16 tests.
-- `anomaly_model.py` — high‑side‑only scoring (a quiet device is not an anomaly).
-- `anomaly_model.py` — first classical‑ML model: robust median/MAD anomaly
+- `eagle_eye.py` — high‑side‑only scoring (a quiet device is not an anomaly).
+- `eagle_eye.py` — first classical‑ML model: robust median/MAD anomaly
   detector, log‑scaled heavy‑tailed features, explainable reasons. 20 tests.
 - `device_report.py` — filter infra/non‑devices (loopback, .0/.255, node
   self‑traffic, null/multicast MACs, zero‑signal), normalize comma‑MAC, cap
@@ -178,8 +181,10 @@ if not yet done).
    Wi‑Fi Address" per device.
 10. Optional: upgrade the models to scikit‑learn IsolationForest behind the
     existing `fit()/score()` interface (only if sklearn is installed).
-11. Fold the `trend`/`threats` results into `report_mailer.py` so the scheduled
-    email includes them, not just the cross‑device scan.
+11. Fold the `trend`/`threats`/`eagle_eye` results into `report_mailer.py` so the
+    scheduled email includes them, not just the cross‑device scan.
+12. **Reconcile the two parallel threat tools** — `threats.py` and `eagle_eye.py`
+    overlap; keep one or merge them.
 
 **How to pick back up:** `cd ~/theSaud && git pull`, then
-`python3 ask.py` (interactive) or `python3 device_report.py --csv ~/features.csv && python3 anomaly_model.py ~/features.csv`.
+`python3 ask.py` (interactive) or `python3 device_report.py --csv ~/features.csv && python3 eagle_eye.py ~/features.csv`.

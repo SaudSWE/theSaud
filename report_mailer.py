@@ -6,7 +6,7 @@ Run on the companion host (the Pi), by a timer. Each run it:
      relationships: data usage, browsing, file transfer, log-in sessions,
      how long each device was online (sorted longest first), location, fast
      log-in/out, and writes the feature table;
-  2. runs the anomaly model (anomaly_model.py) over that table;
+  2. runs Eagle-Eye (EE1), the anomaly model (eagle_eye.py) over that table;
   3. emails both, as one message, to the admin.
 
 It is OFFLINE except for the one outbound email (SMTP to your mail server),
@@ -23,6 +23,7 @@ CREDENTIALS come from an env file (default ~/.streamwatch_env), KEY=VALUE:
     python3 report_mailer.py                      # build + send once
     python3 report_mailer.py --only-flagged       # send ONLY if a device is flagged
     python3 report_mailer.py --to someone@x --threshold 4
+    python3 report_mailer.py --hours 6            # judge the last 6 h (default 24; 0 = all time)
 
 CADENCE: a timer calls this; see systemd/report-mailer.timer. ONE EMAIL A
 MINUTE IS ~1440/DAY and most mail providers suspend a free account for that.
@@ -39,11 +40,12 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import device_report          # noqa: E402
-import anomaly_model          # noqa: E402
+import eagle_eye          # noqa: E402
 
 DEFAULT_DIR = os.path.expanduser("~/mesh_records")
 DEFAULT_ENV = os.path.expanduser("~/.streamwatch_env")
 
+HOURS = 24                 # judge recent behaviour, not all-time totals
 
 def load_env(path):
     env = {}
@@ -70,17 +72,17 @@ def recorder_active():
         return None          # unknown (not systemd / not permitted)
 
 
-def build_report(folder=DEFAULT_DIR, threshold=anomaly_model.THRESHOLD,
-                 features_path=None):
+def build_report(folder=DEFAULT_DIR, threshold=eagle_eye.THRESHOLD,
+                 features_path=None, hours=HOURS):
     """(full text, number of devices flagged). Pure: builds the feature table
     and captures the two tools' output -- no email, no network."""
     features_path = features_path or os.path.join(folder, ".report_features.csv")
     dev_buf = io.StringIO()
     with contextlib.redirect_stdout(dev_buf):
-        device_report.main(["--dir", folder, "--csv", features_path])
+        device_report.main(["--dir", folder, "--csv", features_path, "--hours", str(hours)])
     an_buf = io.StringIO()
     with contextlib.redirect_stdout(an_buf):
-        anomaly_model.main([features_path, "--threshold", str(threshold)])
+        eagle_eye.main([features_path, "--threshold", str(threshold)])
     anomaly_txt = an_buf.getvalue()
 
     flagged = 0
@@ -129,8 +131,8 @@ def send_email(subject, body, env, retries=(10, 30)):
 
 
 def main(argv):
-    folder, env_path, threshold = DEFAULT_DIR, DEFAULT_ENV, anomaly_model.THRESHOLD
-    to_override, only_flagged, dry = None, False, False
+    folder, env_path, threshold = DEFAULT_DIR, DEFAULT_ENV, eagle_eye.THRESHOLD
+    to_override, only_flagged, dry, hours = None, False, False, HOURS
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -144,6 +146,8 @@ def main(argv):
             i += 1; to_override = argv[i] if i < len(argv) else None
         elif a == "--threshold":
             i += 1; threshold = float(argv[i]) if i < len(argv) else threshold
+        elif a == "--hours":
+            i += 1; hours = float(argv[i]) if i < len(argv) else hours
         elif a == "--only-flagged":
             only_flagged = True
         elif a == "--dry-run":
@@ -152,7 +156,7 @@ def main(argv):
 
     if not os.path.isdir(folder):
         print("no records folder: %s" % folder); return 1
-    body, flagged = build_report(folder, threshold)
+    body, flagged = build_report(folder, threshold, hours=hours)
 
     if only_flagged and flagged == 0:
         print("no device flagged; nothing sent (--only-flagged)")

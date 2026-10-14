@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for anomaly_model.py -- the offline robust anomaly detector.
+"""Tests for eagle_eye.py (Eagle-Eye) -- the offline robust anomaly detector.
 
-    python3 tests/test_anomaly_model.py
+    python3 tests/test_eagle_eye.py
 """
 import csv
 import importlib.util
@@ -12,7 +12,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location(
-    "am", os.path.join(HERE, "..", "anomaly_model.py"))
+    "am", os.path.join(HERE, "..", "eagle_eye.py"))
 am = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(am)
 
@@ -84,7 +84,8 @@ check("the heavy-but-not-extreme user is not flagged at 4 sigma",
 
 print("\nthreshold controls sensitivity:")
 r3, _ = am.rank(normal + [odd], threshold=100.0)
-check("nothing flagged when the bar is very high", not any(d["anomaly"] for d in r3))
+check("nothing flagged by score when the bar is very high (40 fast in/out is still a THREAT)",
+      not any(d["score"] >= 100.0 for d in r3) and [d["anomaly"] for d in r3] == [bool(d["threats"]) for d in r3])
 
 print("\nMAD=0 fallback (near-constant feature with one spike):")
 spike = [dev(mac="s%d" % i, blocked_times=0) for i in range(9)] + \
@@ -119,6 +120,24 @@ a = am.rank(normal + [odd])[0]
 b = am.rank(normal + [odd])[0]
 check("same input -> same ranking and scores",
       [(d["mac"], d["score"]) for d in a] == [(d["mac"], d["score"]) for d in b])
+
+print("\nthreat rule: sudden log-ins flagged regardless of the baseline:")
+calm = {"mac": "aa:00:00:00:00:%02x", "fast_flaps": "0", "new_device": "0", "online_s": "3600"}
+herd = [dict(calm, mac=calm["mac"] % i) for i in range(5)]
+hacker = dict(calm, mac="de:ad:00:00:00:01", fast_flaps="3", flap_burst="3")
+r, _ = am.rank(herd + [hacker])
+check("3 fast in/out in a burst -> THREAT, ranked first", r[0]["mac"] == hacker["mac"]
+      and r[0]["anomaly"] and "sudden log-ins: 3 fast in/out within 10 min" in r[0]["threats"])
+check("calm devices carry no threat", all(not d["threats"] for d in r[1:]))
+newbie = dict(calm, mac="de:ad:00:00:00:02", fast_flaps="1", new_device="1")
+check("new device + 1 fast in/out -> THREAT", am.threats(newbie) == ["new device logging in and out fast"])
+check("known device with 1 fast in/out is not a threat", am.threats(dict(calm, fast_flaps="1", flap_burst="1")) == [])
+check("isolated fast in/outs (hours apart) are not a threat",
+      am.threats(dict(calm, fast_flaps="4", flap_burst="1")) == [])
+check("new device that stays connected is not a threat", am.threats(dict(calm, new_device="1")) == [])
+everyone = [dict(calm, mac=calm["mac"] % i, fast_flaps="4", flap_burst="2") for i in range(4)]
+check("threat holds even when every device flaps (no baseline masking)",
+      all(d["anomaly"] for d in am.rank(everyone)[0]))
 
 print("\n%d passed, %d failed" % (PASS[0], FAIL[0]))
 sys.exit(1 if FAIL[0] else 0)

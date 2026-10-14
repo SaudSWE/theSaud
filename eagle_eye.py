@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline anomaly model over the per-device feature table.
+"""Eagle-Eye (EE1): offline anomaly model over the per-device feature table.
 
 Classical, robust, pure-stdlib anomaly detection -- no internet, no pip, no
 GPU; it runs on the Pi and keeps every resident's data on the server (PRV).
@@ -30,9 +30,9 @@ NOTE ON SIZE
   indicative until more devices / more history accumulate. Re-running over
   time, or scoring a device against its OWN past, is the stronger next step.
 
-    python3 anomaly_model.py                      # reads ~/features.csv
-    python3 anomaly_model.py path/to/features.csv
-    python3 anomaly_model.py --threshold 3.5 --json
+    python3 eagle_eye.py                      # reads ~/features.csv
+    python3 eagle_eye.py path/to/features.csv
+    python3 eagle_eye.py --threshold 3.5 --json
 """
 import csv
 import json
@@ -40,6 +40,7 @@ import math
 import os
 import sys
 
+NAME = "Eagle-Eye (EE1)"            # model name + version, shown on every scan
 DEFAULT_FEATURES = os.path.expanduser("~/features.csv")
 THRESHOLD = 4.0                      # robust-sigma past which a device is flagged
 CONTRIB = 2.0                        # a feature is a "reason" at |z| >= this
@@ -53,6 +54,21 @@ FEATURES = [
     ("large_flows", True), ("blocked_times", False), ("times_not_connected", False),
 ]
 MAD_TO_SIGMA = 1.4826                # scales MAD to a normal-consistent sigma
+FLAP_BURST = 2                       # this many fast in/outs within 10 min = THREAT
+
+
+def threats(row):
+    """Fixed rules, independent of the baseline: sudden log-in/out is a
+    potential threat even when every device is doing it."""
+    flaps = int(value(row, "fast_flaps", False) or 0)
+    burst = int(value(row, "flap_burst", False) or 0)
+    new = int(value(row, "new_device", False) or 0)
+    out = []
+    if burst >= FLAP_BURST:
+        out.append("sudden log-ins: %d fast in/out within 10 min" % burst)
+    if new and flaps:
+        out.append("new device logging in and out fast")
+    return out
 
 
 def value(row, col, log):
@@ -124,12 +140,14 @@ def rank(rows, model=None, threshold=THRESHOLD):
     for r in rows:
         headline, zs = score(model, r)
         reasons = [(c, z) for c, z in zs if z >= CONTRIB]   # high-side only
+        th = threats(r)
         out.append({
             "mac": r.get("mac", ""), "ip": r.get("ip", ""),
             "name": r.get("name", ""), "score": round(headline, 2),
-            "anomaly": headline >= threshold, "reasons": reasons,
+            "anomaly": headline >= threshold or bool(th), "reasons": reasons,
+            "threats": th,
         })
-    out.sort(key=lambda d: d["score"], reverse=True)
+    out.sort(key=lambda d: (bool(d["threats"]), d["score"]), reverse=True)
     return out, model
 
 
@@ -169,14 +187,16 @@ def main(argv):
 
     n = len(rows)
     flagged = [d for d in ranked if d["anomaly"]]
-    print("Anomaly scan of %d device(s); threshold %.1f robust-sigma." % (n, threshold))
+    print("%s scan of %d device(s); threshold %.1f robust-sigma." % (NAME, n, threshold))
     if n < 5:
         print("(only %d devices -- baseline is rough; scores are indicative)" % n)
     print("=" * 64)
     for d in ranked:
-        mark = "  !! ANOMALY" if d["anomaly"] else ""
+        mark = "  !! THREAT" if d["threats"] else "  !! ANOMALY" if d["anomaly"] else ""
         who = d["name"] or d["ip"] or d["mac"]
         print("%-18s %-16s  score %5.2f%s" % (who, d["ip"] or d["mac"], d["score"], mark))
+        for t in d["threats"]:
+            print("      ! %s" % t)
         for col, z in d["reasons"][:4]:
             print("      - %s %s (%.1f sigma)" % (col, direction(z), z))
     print("=" * 64)

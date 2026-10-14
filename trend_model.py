@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Per-device-over-time anomaly model -- each device vs its OWN history.
 
-The cross-device model (anomaly_model.py) asks "which device differs from the
+The cross-device model (eagle_eye.py) asks "which device differs from the
 others" -- which, with few devices, flags the Pi just for being the always-on
 server. This model asks a better question: "is THIS device behaving abnormally
 FOR ITSELF today?" It builds one feature row per device per day, learns each
@@ -10,7 +10,7 @@ latest day when it deviates -- a phone that suddenly browses 5x its usual sites
 or moves 10x its usual data. It works with few devices, because each device
 supplies many days.
 
-Pure stdlib, offline, reuses anomaly_model's robust math and high-side scoring.
+Pure stdlib, offline, reuses eagle_eye's robust math and high-side scoring.
 
   trend_model.py                    reads ~/mesh_records
   trend_model.py --min-days 2       flag with as few as 2 prior days (default 3)
@@ -28,7 +28,7 @@ from collections import defaultdict
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import device_report as dr       # noqa: E402
-import anomaly_model as am       # noqa: E402
+import eagle_eye as am       # noqa: E402
 
 DEFAULT_DIR = os.path.expanduser("~/mesh_records")
 MIN_DAYS = 3
