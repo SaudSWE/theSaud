@@ -18,6 +18,64 @@ gateway (`SW_EMAIL_TO`, `SW_THRESHOLD`, `SW_EXTRA`), then
 
 ---
 
+## The nine functions
+
+The system's functions, what delivers each one, and where it's described.
+"Pi only" means the code or configuration lives on the Pi or the routers and
+is **not in this repository** — push it to get it documented and tested in full.
+
+| # | Function | Delivered by | In repo | Reference | Tests |
+|---|----------|--------------|---------|-----------|-------|
+| 1 | **Device approval** — internet only for approved devices | gateway gate + allow/deny lists | yes | G3, G4, L | G3, G4, G4b, G4c, L1, L2 |
+| 2 | **Data monitoring** — per-device usage, 500 MB alerts, data caps | metering + `SW_THRESHOLD="500M"`, `limit()`, `throttle()`, device report | yes | G1, G6, G9, A1 | G1, G6a, G6b, G9, A1 |
+| 3 | **Email remote control** — close, open, limit, throttle, block, devices, browsing, locate, zones, calibrate | gateway email command channel | yes | G2 (table) | G2, G3, G5, G6a, G6b, G10, G11, G13, G14, G15 |
+| 4 | **Location tracking** — live positions, map, events, steering | `mesh_tracker.py` + live map (Pi only); gateway location and forbidden area; recorder events | partly | F4, G12–G15, R | M1–M4, G12–G15 |
+| 5 | **Recording** — everything into a daily CSV | `mesh_recorder.py` (`mesh-recorder` unit: Pi only) | yes | R | R1–R4 |
+| 6 | **Nightly report** — per-device daily summary email | `report_mailer.py` on a nightly schedule (schedule: Pi only) | partly | F6, A7 | N1, A7, S3 |
+| 7 | **Mesh network** — three routers, one network, seamless roaming | 802.11s on the GL-MT3000s (router config) + tracker steering | config | F7 | W1–W3 |
+| 8 | **Remote access** — router terminal and map from anywhere, behind Google sign-in | ngrok + Google login on the Pi (Pi only) | no | F8 | X1–X3 |
+| 9 | **Safety and upkeep** — safe deploys with rollback, Pi firewall, automated tests | tests in `tests/` (yes); deploy/rollback and firewall (Pi only) | partly | F9, S, T | U1–U2, S1–S2, T |
+
+### F4. Location tracking (tracker and map on the Pi)
+From the system description in the recorder's data dictionary:
+- `mesh_tracker.py` estimates each device's position from Wi-Fi signal at the
+  router it's connected to (`d = 10^((A − RSSI)/(10 n))`, per-station A and n
+  from calibration) plus a particle filter — expect metres of error.
+- **Events:** ARRIVED, LEFT, HANDOVER (moved to another router), STEER,
+  APPROACHING, LEAVING, IDLE — recorded as `tracker_event` rows; positions as
+  `device_position` rows every ~10 s.
+- **Steering:** phones are sticky, so when the signal drops below −70 dBm the
+  tracker briefly disconnects the phone so it rejoins the closest router.
+- **Live map:** served by the Pi on port 8090.
+- The gateway also traces location itself (G14) and enforces the forbidden area (G15).
+
+### F6. Nightly report
+`report_mailer.py` builds the per-device summary (device report + Eagle-Eye
+scan) and emails it; `--hours 24` makes it a daily summary. The repo's timer
+runs it every 5 min — a nightly run needs `OnCalendar=daily` (or a set time) in
+the installed timer on the Pi.
+
+### F7. Mesh network
+Three GL-MT3000 routers on OpenWrt 24.10 in an 802.11s mesh: main123 (L1,
+gateway: internet, DHCP, firewall), acf (L2) and 456 (L3) as mesh nodes —
+one network name everywhere. Roaming is helped by the tracker's steering.
+Configured on the routers; the recorder logs mesh health as `mesh_link` rows.
+
+### F8. Remote access
+The live map (Pi, port 8090) is published through **ngrok behind Google
+login**, so it can be opened from anywhere by approved Google accounts. The
+router terminal is published the same way. Configuration lives on the Pi.
+
+### F9. Safety and upkeep
+- **Automated tests:** 14 suites in `tests/`, stdlib only.
+- **Self-healing gateway:** StreamWatch restarts on boot and respawns if it
+  exits; the gate re-applies itself after a firewall reload; detection is
+  immune to boot-time clock corrections.
+- **Safe deploys with rollback** and the **Pi firewall:** configured on the Pi,
+  not in this repository.
+
+---
+
 ## G — Gateway: `streamwatch_v12.py`
 
 ### G1. Traffic metering and threshold alerts

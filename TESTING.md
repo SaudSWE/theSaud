@@ -7,6 +7,24 @@ match `FUNCTIONALITY.md`. For each test: do the **Steps**, compare with
 `GW$` = run on the gateway (`ssh root@192.168.8.1`). `PI$` = run on the Pi in
 `~/theSaud`. `CSV` = `~/mesh_records/records_$(date +%F).csv` on the Pi.
 
+## Tests by function
+
+| # | Function | Tests |
+|---|----------|-------|
+| 1 | Device approval | G3, G4, G4b, G4c, L1, L2 |
+| 2 | Data monitoring | G1, G6a, G6b, G9, A1 |
+| 3 | Email remote control | G2, G3, G5, G6a, G6b, G10, G11, G13, G14, G15 |
+| 4 | Location tracking | M1–M4, G12, G13, G14, G15 |
+| 5 | Recording | R1–R4 |
+| 6 | Nightly report | N1, A7, S3 |
+| 7 | Mesh network | W1–W3 |
+| 8 | Remote access | X1–X3 |
+| 9 | Safety and upkeep | U1–U2, S1, S2, T |
+
+Steps marked **(confirm)** test parts whose code isn't in the repository
+(tracker, map, remote access, deploy script, Pi firewall); adjust names,
+addresses or interfaces to match your setup.
+
 ---
 
 ## 0. Before you start
@@ -240,6 +258,91 @@ Test phone IP used below: `PHONE=192.168.8.X` (replace with yours).
 
 ---
 
+## M — Location tracking: tracker, map, events, steering (function 4)
+
+### M1. Live positions on the map (confirm)
+- Steps: on the LAN, open `http://192.168.8.162:8090`. Carry the test phone from L1 to L2 to L3, pausing ~30 s at each.
+- Expect: every device appears near its router; the phone's marker follows you within roughly 10–20 s of each move.
+- [ ] Pass [ ] Fail — notes:
+
+### M2. Positions are recorded
+- Steps: `PI$ grep ',device_position,' CSV | grep PHONE | tail -3`
+- Expect: rows every ~10 s with station (L1/L2/L3), distance and movement state that change as the phone moves.
+- [ ] Pass [ ] Fail — notes:
+
+### M3. Tracker events
+- Steps: turn the phone's Wi-Fi off for a minute, then on; walk it from L1 to L2. `PI$ grep ',tracker_event,' CSV | grep -i -E 'PHONE|iphone' | tail -8`
+- Expect: LEFT then ARRIVED for the Wi-Fi toggle; HANDOVER (peer = previous station) for the walk.
+- [ ] Pass [ ] Fail — notes:
+
+### M4. Steering a sticky phone (confirm)
+- Steps: with the phone connected to L1, walk to the far side near L3 without turning Wi-Fi off. Wait at L3 for a minute.
+- Expect: once L1's signal drops below about −70 dBm the tracker STEERs the phone — a brief disconnect — and it rejoins L3. A `STEER` row, then a `HANDOVER` row, appear in `tracker_event`.
+- [ ] Pass [ ] Fail — notes:
+
+---
+
+## N — Nightly report (function 6)
+
+### N1. Daily summary arrives (confirm)
+- Steps: `PI$ systemctl list-timers --all | grep -i -E 'report|nightly'` to see when it runs. Check the inbox the morning after.
+- Expect: the timer's next run is at your nightly time; one email with a per-device summary of the previous 24 h (online time, data, browsing, Eagle-Eye findings).
+- [ ] Pass [ ] Fail — notes:
+
+---
+
+## W — Mesh network (function 7)
+
+### W1. All three routers are meshed
+- Steps: on each router, find the mesh interface with `iw dev`, then `iw dev <mesh-if> station dump | grep -c Station`. Also `PI$ grep ',mesh_link,' CSV | tail -6`.
+- Expect: each router sees the other two (count 2); `mesh_link` rows show the peers with a healthy signal.
+- [ ] Pass [ ] Fail — notes:
+
+### W2. One network everywhere
+- Steps: on the test phone, look at the Wi-Fi list at L1, L2 and L3.
+- Expect: the same single network name at each location; no separate per-router networks.
+- [ ] Pass [ ] Fail — notes:
+
+### W3. Seamless roaming
+- Steps: start a video call or stream on the phone at L1, walk slowly to L2 then L3.
+- Expect: the call keeps going (a stall of a second or two at most); `tracker_event` shows HANDOVER rows as it changes router.
+- [ ] Pass [ ] Fail — notes:
+
+---
+
+## X — Remote access (function 8)
+
+### X1. Map from outside the house (confirm)
+- Steps: turn the phone's Wi-Fi off (mobile data only). Open your public map address (the ngrok URL).
+- Expect: a Google sign-in page first; after signing in with an approved account, the live map loads.
+- [ ] Pass [ ] Fail — notes:
+
+### X2. Strangers are refused (confirm)
+- Steps: open the same address in a private/incognito window and sign in with a Google account that is **not** approved (or don't sign in).
+- Expect: access refused; the map never loads.
+- [ ] Pass [ ] Fail — notes:
+
+### X3. Router terminal from outside (confirm)
+- Steps: on mobile data, open your router-terminal address and sign in with the approved Google account; run `uptime`.
+- Expect: Google sign-in, then a working terminal on the router. The same address refuses unapproved accounts.
+- [ ] Pass [ ] Fail — notes:
+
+---
+
+## U — Safety and upkeep (function 9)
+
+### U1. Pi firewall (confirm)
+- Steps: `PI$ sudo ufw status verbose` (or `sudo nft list ruleset` if you use nftables). From another LAN device try a port you meant to be closed, e.g. `nc -zv 192.168.8.162 <port>`.
+- Expect: the rules match your policy; only the ports you intend (e.g. SSH, the map) answer; the closed port is refused.
+- [ ] Pass [ ] Fail — notes:
+
+### U2. Safe deploy with rollback (confirm)
+- Steps: using your deploy script, deploy a deliberately broken copy (e.g. add a syntax error to a scratch copy of `streamwatch_v12.py`).
+- Expect: the deploy detects the failure and restores the previous working version on its own; `GW$ pgrep -af streamwatch_v12` still shows the service running. Then deploy the good version normally.
+- [ ] Pass [ ] Fail — notes:
+
+---
+
 ## T — Automated tests (optional, run them yourself)
 
 - Steps: `PI$ for t in tests/test_*.py; do python3 $t | tail -1; done`
@@ -250,13 +353,19 @@ Test phone IP used below: `PHONE=192.168.8.X` (replace with yours).
 
 ## Results summary
 
-| Area | Tests | Passed | Failed | Notes |
-|------|-------|--------|--------|-------|
-| Gateway (G0–G15) | 20 | | | |
-| Lists (L1–L2) | 2 | | | |
-| Recorder (R1–R4) | 4 | | | |
-| Analysis (A1–A7) | 7 | | | |
-| Services (S1–S3) | 3 | | | |
-| Automated (T) | 1 | | | |
+| # | Function | Tests | Passed | Failed | Notes |
+|---|----------|-------|--------|--------|-------|
+| 1 | Device approval | G3, G4, G4b, G4c, L1, L2 | | | |
+| 2 | Data monitoring | G1, G6a, G6b, G9, A1 | | | |
+| 3 | Email remote control | G2, G3, G5, G6a, G6b, G10, G11, G13, G14, G15 | | | |
+| 4 | Location tracking | M1–M4, G12–G15 | | | |
+| 5 | Recording | R1–R4 | | | |
+| 6 | Nightly report | N1, A7, S3 | | | |
+| 7 | Mesh network | W1–W3 | | | |
+| 8 | Remote access | X1–X3 | | | |
+| 9 | Safety and upkeep | U1–U2, S1, S2, T | | | |
+| — | Other (G0, G7a, G7b, G8, A2–A6) | G0, G7a, G7b, G8, A2, A3, A4, A5, A6 | | | |
+
+Total: 50 tests (some count toward more than one function).
 
 Tested by: ________  Date: ________
