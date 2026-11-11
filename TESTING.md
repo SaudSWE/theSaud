@@ -252,7 +252,7 @@ Test phone IP used below: `PHONE=192.168.8.X` (replace with yours).
 
 | Area | Tests | Passed | Failed | Notes |
 |------|-------|--------|--------|-------|
-| Gateway (G0–G15) | 21 | | | |
+| Gateway (G0–G15) | 20 | | | |
 | Lists (L1–L2) | 2 | | | |
 | Recorder (R1–R4) | 4 | | | |
 | Analysis (A1–A7) | 7 | | | |
