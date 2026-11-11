@@ -4,35 +4,37 @@ A checklist for testing every function yourself on the real system. Test IDs
 match `FUNCTIONALITY.md`. For each test: do the **Steps**, compare with
 **Expect**, tick **Pass** or **Fail**, and note anything odd.
 
-`GW$` = run on the gateway (`ssh root@192.168.8.1`). `PI$` = run on the Pi in
-`~/theSaud`. `CSV` = `~/mesh_records/records_$(date +%F).csv` on the Pi.
+`GW$` = run on the gateway (`ssh root@192.168.8.1`). `PI$` = run on the Pi
+(section A from `~/theSaud`). `CSV` = `~/mesh_records/records_$(date +%F).csv` on the Pi.
 
 ## Tests by function
 
 | # | Function | Tests |
 |---|----------|-------|
 | 1 | Device approval | G3, G4, G4b, G4c, L1, L2 |
-| 2 | Data monitoring | G1, G6a, G6b, G9, A1 |
-| 3 | Email remote control | G2, G3, G5, G6a, G6b, G10, G11, G13, G14, G15 |
-| 4 | Location tracking | M1–M4, G12, G13, G14, G15 |
+| 2 | Data monitoring | G1, G6a, G6b, G9 |
+| 3 | Email remote control | G2, G3, G5, G6a, G6b, G10, G11, G13, G14 |
+| 4 | Location tracking | M1–M4, G12, G13, G14 |
 | 5 | Recording | R1–R4 |
-| 6 | Nightly report | N1, A7, S3 |
+| 6 | Nightly report | N1, N2 |
 | 7 | Mesh network | W1–W3 |
 | 8 | Remote access | X1–X3 |
-| 9 | Safety and upkeep | U1–U2, S1, S2, T |
+| 9 | Safety and upkeep | U1–U3, S1, S2, T |
 
-Steps marked **(confirm)** test parts whose code isn't in the repository
-(tracker, map, remote access, deploy script, Pi firewall); adjust names,
-addresses or interfaces to match your setup.
+The deployed system runs from **Manarat-Cyber** (`~/streamwatch-live` on the
+Pi). Section A tests tools that exist only in this repository (`~/theSaud`).
+The forbidden area is not part of the system and is not tested.
 
 ---
 
 ## 0. Before you start
 
-- [ ] **Deploy the latest code.**
-  `PI$ git pull` (if `ask.py` was edited on the Pi, `git stash` first), then
-  `PI$ cat streamwatch_v12.py | ssh root@192.168.8.1 'cat > /root/streamwatch_v12.py'`
-  and `GW$ /etc/init.d/streamwatch restart`.
+- [ ] **Make sure the deployed code is current.** Changes go into Manarat-Cyber
+  and are deployed only with its scripts:
+  `PI$ ~/streamwatch-live/streamwatch/deploy/deploy.sh` (Pi services) and
+  `PI$ ~/streamwatch-live/streamwatch/deploy/deploy-router.sh` (router).
+  **Don't** copy `streamwatch_v12.py` from `~/theSaud` to the router — it's an
+  older copy and would replace the deployed one.
 - [ ] **Keep yourself connected.** Your laptop and the Pi must be on the allow
   list before any gate test: `GW$ python3 /root/group_lists.py allow list`.
   If you ever lock yourself out: `GW$ /etc/init.d/streamwatch gate_down`.
@@ -153,13 +155,6 @@ Test phone IP used below: `PHONE=192.168.8.X` (replace with yours).
 - Expect: TRACE lines in the log as it moves; reply `[streamwatch] location - …` with radio and distance range.
 - [ ] Pass [ ] Fail — notes:
 
-### G15. Forbidden area
-- Steps:
-  1. Dry run: add `--forbidden-rssi -55 --forbidden-dry-run`, restart; walk the phone right next to an AP. Check the log.
-  2. Live: remove `--forbidden-dry-run`, add `--forbidden-applies all`, restart. Keep the phone **on the allow list** (so it has internet to lose — a held phone has none anyway). Walk it next to the AP, then away. Email `zones()`.
-- Expect: 1 → the log prints the iptables plan, nothing enforced. (The dry run uses the default `--forbidden-applies unauthorized`, which skips allow-listed devices — use a held device, or add `--forbidden-applies all` here too.) 2 → close to the AP the phone stays on Wi-Fi but loses internet (after 2 samples); walking away restores it (after 3 samples); `zones()` reply `[streamwatch] forbidden-area status`. Email `unforbid()` restores everyone.
-- [ ] Pass [ ] Fail — notes:
-
 ---
 
 ## L — Lists admin (`group_lists.py`)
@@ -201,6 +196,9 @@ Test phone IP used below: `PHONE=192.168.8.X` (replace with yours).
 ---
 
 ## A — Analysis & model (Pi)
+
+These tools exist only in this repository and aren't deployed. Run them from
+`~/theSaud` (`git pull` there first).
 
 ### A1. Device report
 - Steps: `PI$ python3 device_report.py`, then `python3 device_report.py PHONE`, then `python3 device_report.py --hours 24 --csv ~/features.csv`
@@ -247,46 +245,51 @@ Test phone IP used below: `PHONE=192.168.8.X` (replace with yours).
 - [ ] Pass [ ] Fail — notes:
 
 ### S2. Pi reboot
-- Steps: `PI$ sudo reboot`. After it's back: `PI$ systemctl is-active mesh-recorder; timedatectl | grep synchronized; systemctl list-timers report-mailer.timer`; confirm the Pi rejoined the **mesh** Wi-Fi (`ip -br addr` shows 192.168.8.x).
-- Expect: `active`, `yes`, timer listed, 192.168.8.x address.
+- Steps: `PI$ sudo reboot`. After it's back: `PI$ systemctl is-active mesh-tracker mesh-recorder ngrok ttyd nftables`, `PI$ timedatectl | grep synchronized`, `PI$ systemctl list-timers streamwatch-report.timer`, and confirm the Pi rejoined the **mesh** Wi-Fi (`ip -br addr` shows 192.168.8.x). If you set up the always-on Claude bridge: `systemctl --user is-active claude-remote`.
+- Expect: every unit `active`; `yes`; the report timer listed for 00:15; a 192.168.8.x address.
 - [ ] Pass [ ] Fail — notes:
 
-### S3. Report mailer schedule
-- Steps: `PI$ systemctl cat report-mailer.service report-mailer.timer | grep -E 'ExecStart|OnCalendar'`
-- Expect: the cadence and flags you intend (repo default: every 5 min, emails every run; add `--only-flagged` to email only on flags).
+### S3. Only the intended mailers are scheduled
+- Steps: `PI$ systemctl list-timers --all | grep -E 'streamwatch-report|report-mailer'`
+- Expect: `streamwatch-report.timer` scheduled for 00:15; `report-mailer.timer` (the older mailer from this repository) not scheduled.
 - [ ] Pass [ ] Fail — notes:
 
 ---
 
 ## M — Location tracking: tracker, map, events, steering (function 4)
 
-### M1. Live positions on the map (confirm)
-- Steps: on the LAN, open `http://192.168.8.162:8090`. Carry the test phone from L1 to L2 to L3, pausing ~30 s at each.
-- Expect: every device appears near its router; the phone's marker follows you within roughly 10–20 s of each move.
+### M1. Live positions on the map
+- Steps: on the LAN, open `http://192.168.8.162:8090/mesh_map.html`. Carry the test phone from L1 to L2 to L3, pausing ~30 s at each.
+- Expect: every device appears near its router; the phone's marker follows you (the tracker polls every 2 s and smooths, so allow a few seconds).
 - [ ] Pass [ ] Fail — notes:
 
 ### M2. Positions are recorded
 - Steps: `PI$ grep ',device_position,' CSV | grep PHONE | tail -3`
-- Expect: rows every ~10 s with station (L1/L2/L3), distance and movement state that change as the phone moves.
+- Expect: recent rows with the station (L1/L2/L3), distance and movement state, changing as the phone moves.
 - [ ] Pass [ ] Fail — notes:
 
 ### M3. Tracker events
-- Steps: turn the phone's Wi-Fi off for a minute, then on; walk it from L1 to L2. `PI$ grep ',tracker_event,' CSV | grep -i -E 'PHONE|iphone' | tail -8`
-- Expect: LEFT then ARRIVED for the Wi-Fi toggle; HANDOVER (peer = previous station) for the walk.
+- Steps: turn the phone's Wi-Fi off for a minute, then on; then walk it from L1 to L2. `PI$ tail -20 ~/mesh_tracker/tracker_events.csv` and `PI$ grep ',tracker_event,' CSV | tail -8`
+- Expect: LEFT (after 30 s unseen) then ARRIVED for the Wi-Fi toggle; HANDOVER for the walk.
 - [ ] Pass [ ] Fail — notes:
 
-### M4. Steering a sticky phone (confirm)
-- Steps: with the phone connected to L1, walk to the far side near L3 without turning Wi-Fi off. Wait at L3 for a minute.
-- Expect: once L1's signal drops below about −70 dBm the tracker STEERs the phone — a brief disconnect — and it rejoins L3. A `STEER` row, then a `HANDOVER` row, appear in `tracker_event`.
+### M4. Steering a sticky phone
+- Steps: with the phone connected to L1, walk to the far side near L3 without turning Wi-Fi off; wait there a minute.
+- Expect: after 3 polls in a row below −75 dBm (or beyond L1's zone radius + 2 m), a `STEER` event; the phone drops Wi-Fi for about 1–3 s and rejoins L3 (`HANDOVER`). It won't steer if two routers already hear the phone, or if no other router is at least 3 dB stronger.
 - [ ] Pass [ ] Fail — notes:
 
 ---
 
 ## N — Nightly report (function 6)
 
-### N1. Daily summary arrives (confirm)
-- Steps: `PI$ systemctl list-timers --all | grep -i -E 'report|nightly'` to see when it runs. Check the inbox the morning after.
-- Expect: the timer's next run is at your nightly time; one email with a per-device summary of the previous 24 h (online time, data, browsing, Eagle-Eye findings).
+### N1. Scheduled and switched on
+- Steps: `PI$ systemctl list-timers streamwatch-report.timer` and `PI$ grep SW_REPORT ~/.streamwatch_report.env`
+- Expect: next run at 00:15; `SW_REPORT=1` (and `SW_REPORT_QWEN=1` if you want the model's one-line summaries).
+- [ ] Pass [ ] Fail — notes:
+
+### N2. Report arrives and matches the data
+- Steps: run it now: `PI$ sudo systemctl start streamwatch-report.service`, then `PI$ journalctl -u streamwatch-report -n 5 --no-pager` and `PI$ ls -t ~/mesh_records/reports/ | head -2`. Check the inbox.
+- Expect: the journal says it was sent; a `report_<date>.json` and `.txt` saved; one email with a per-device summary of the previous day. Pick one device and check its traffic figure against the saved `.txt`.
 - [ ] Pass [ ] Fail — notes:
 
 ---
@@ -300,45 +303,51 @@ Test phone IP used below: `PHONE=192.168.8.X` (replace with yours).
 
 ### W2. One network everywhere
 - Steps: on the test phone, look at the Wi-Fi list at L1, L2 and L3.
-- Expect: the same single network name at each location; no separate per-router networks.
+- Expect: the same single network name at each location.
 - [ ] Pass [ ] Fail — notes:
 
-### W3. Seamless roaming
+### W3. Roaming
 - Steps: start a video call or stream on the phone at L1, walk slowly to L2 then L3.
-- Expect: the call keeps going (a stall of a second or two at most); `tracker_event` shows HANDOVER rows as it changes router.
+- Expect: the call continues; a short stall (about 1–3 s) is normal when the tracker steers the phone; `tracker_event` shows HANDOVER (and maybe STEER) rows.
 - [ ] Pass [ ] Fail — notes:
 
 ---
 
 ## X — Remote access (function 8)
 
-### X1. Map from outside the house (confirm)
-- Steps: turn the phone's Wi-Fi off (mobile data only). Open your public map address (the ngrok URL).
-- Expect: a Google sign-in page first; after signing in with an approved account, the live map loads.
+### X1. Map from outside the house
+- Steps: turn the phone's Wi-Fi off (mobile data only). Open your ngrok portal address with `/map` at the end.
+- Expect: Google sign-in first; signed in as `manaratcyber@gmail.com`, the live map loads.
 - [ ] Pass [ ] Fail — notes:
 
-### X2. Strangers are refused (confirm)
-- Steps: open the same address in a private/incognito window and sign in with a Google account that is **not** approved (or don't sign in).
-- Expect: access refused; the map never loads.
+### X2. Strangers are refused
+- Steps: open the portal address in a private/incognito window and sign in with any other Google account (or don't sign in).
+- Expect: refused (403); neither the map nor the terminal loads.
 - [ ] Pass [ ] Fail — notes:
 
-### X3. Router terminal from outside (confirm)
-- Steps: on mobile data, open your router-terminal address and sign in with the approved Google account; run `uptime`.
-- Expect: Google sign-in, then a working terminal on the router. The same address refuses unapproved accounts.
+### X3. Router terminal from outside
+- Steps: on mobile data, open the portal address itself (no `/map`), sign in as `manaratcyber@gmail.com`, and run `uptime`.
+- Expect: a working terminal on the router. On the Pi, `ss -ltn | grep 7681` shows ttyd listening only on `127.0.0.1`.
 - [ ] Pass [ ] Fail — notes:
 
 ---
 
 ## U — Safety and upkeep (function 9)
 
-### U1. Pi firewall (confirm)
-- Steps: `PI$ sudo ufw status verbose` (or `sudo nft list ruleset` if you use nftables). From another LAN device try a port you meant to be closed, e.g. `nc -zv 192.168.8.162 <port>`.
-- Expect: the rules match your policy; only the ports you intend (e.g. SSH, the map) answer; the closed port is refused.
+### U1. Pi firewall
+- Steps: `PI$ sudo nft list table inet streamwatch_fw`. From another device on the LAN: `nc -zv 192.168.8.162 22` and `nc -zv 192.168.8.162 8090`. Then `PI$ sudo ss -ltnp | grep -E ':5900|:3389'`.
+- Expect: the table accepts 22 and 8090 only from 192.168.8.0/24 and loopback; both answer from the LAN. **Known issue:** VNC (5900) and RDP (3389) currently listen on all interfaces with no firewall rule, so this check fails until they're firewalled or turned off.
 - [ ] Pass [ ] Fail — notes:
 
-### U2. Safe deploy with rollback (confirm)
-- Steps: using your deploy script, deploy a deliberately broken copy (e.g. add a syntax error to a scratch copy of `streamwatch_v12.py`).
-- Expect: the deploy detects the failure and restores the previous working version on its own; `GW$ pgrep -af streamwatch_v12` still shows the service running. Then deploy the good version normally.
+### U2. Pi deploy is gated and recorded
+- Steps: `PI$ ~/streamwatch-live/streamwatch/deploy/deploy.sh`, then `PI$ cat ~/.streamwatch-deployed`, `PI$ git -C ~/streamwatch-live rev-parse HEAD` and `PI$ tail -20 ~/streamwatch-deploy.log`.
+- Expect: "up to date" (or a deploy ending `OK: … deployed and healthy`); the recorded commit equals HEAD; the log shows "tests passed" and a health check before every "OK".
+- Optional rollback drill: push a commit to Manarat-Cyber that fails a test, run `deploy.sh` → it stops at the tests and restarts nothing; then revert that commit.
+- [ ] Pass [ ] Fail — notes:
+
+### U3. Router deploy safety net is disarmed after a good deploy
+- Steps: `PI$ ~/streamwatch-live/streamwatch/deploy/deploy-router.sh` (no-op if nothing changed), then `GW$ ls /root/.sw-deploy/` and `GW$ /etc/init.d/sw-rollback enabled && echo armed || echo disarmed`.
+- Expect: no `pending` file; `disarmed`. After a real deploy the output ends `deployed, healthy and confirmed (dead man's switch disarmed)`.
 - [ ] Pass [ ] Fail — notes:
 
 ---
@@ -356,16 +365,16 @@ Test phone IP used below: `PHONE=192.168.8.X` (replace with yours).
 | # | Function | Tests | Passed | Failed | Notes |
 |---|----------|-------|--------|--------|-------|
 | 1 | Device approval | G3, G4, G4b, G4c, L1, L2 | | | |
-| 2 | Data monitoring | G1, G6a, G6b, G9, A1 | | | |
-| 3 | Email remote control | G2, G3, G5, G6a, G6b, G10, G11, G13, G14, G15 | | | |
-| 4 | Location tracking | M1–M4, G12–G15 | | | |
+| 2 | Data monitoring | G1, G6a, G6b, G9 | | | |
+| 3 | Email remote control | G2, G3, G5, G6a, G6b, G10, G11, G13, G14 | | | |
+| 4 | Location tracking | M1–M4, G12, G13, G14 | | | |
 | 5 | Recording | R1–R4 | | | |
-| 6 | Nightly report | N1, A7, S3 | | | |
+| 6 | Nightly report | N1, N2 | | | |
 | 7 | Mesh network | W1–W3 | | | |
 | 8 | Remote access | X1–X3 | | | |
-| 9 | Safety and upkeep | U1–U2, S1, S2, T | | | |
-| — | Other (G0, G7a, G7b, G8, A2–A6) | G0, G7a, G7b, G8, A2, A3, A4, A5, A6 | | | |
+| 9 | Safety and upkeep | U1–U3, S1, S2, T | | | |
+| — | Other | G0, G7a, G7b, G8, S3; repo-only tools A1–A7 | | | |
 
-Total: 50 tests (some count toward more than one function).
+Total: 51 tests (some count toward more than one function).
 
 Tested by: ________  Date: ________

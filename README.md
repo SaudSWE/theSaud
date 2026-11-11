@@ -15,7 +15,7 @@ in [`ARCHITECTURE.md`](ARCHITECTURE.md); runbook in [`handoff.md`](handoff.md).
 Give a household one place to see and control its network: who is on it, what
 each device is doing (data, browsing, file transfer, where it is, how long it
 has been online), and to **act** on that — allow or block a device, cap or
-throttle it, cut internet in a forbidden zone — plus an **offline, on-server
+throttle it — plus an **offline, on-server
 classical-ML layer** that flags abnormal devices and potential threats. Scope
 comes from the project whiteboard (12 items) and the SRS; the design keeps all
 data local (consented household monitoring, domain-level metadata only).
@@ -46,7 +46,7 @@ Three layers, all built and tested:
   `trend`, `threats`, `history`, `email`, …
 - `report_mailer.py` + `systemd/` — scheduled build + email of the reports.
 
-Whiteboard coverage: items **1–9 done**, **11 (forbidden area)** coded,
+Whiteboard coverage: items **1–9 done**, **11 (forbidden area)** out of scope (not part of the system),
 **Adblocker** is a separate team, **10 (IoT)** and **12 (Attack)** TBD. Full
 traceability in `REQUIREMENTS.md`; design in `ARCHITECTURE.md`.
 
@@ -75,7 +75,7 @@ or by the mailer).
 - `mesh_recorder.py` — drop the router's own DNS/boot-log noise from the CSV.
 - Earlier: item-9 malfunction detection, outage-email retry, clock-jump
   immunity, browsing capture, date/time/access/email columns, the group gate,
-  per-port rules, forbidden-area enforcement.
+  per-port rules.
 
 ## 5) Failed Attempts / Lessons
 
@@ -85,7 +85,8 @@ or by the mailer).
   fixed quiet-device false flags (high-side only); the fix is `trend_model.py`.
 - **MAD=0 masking** → identical history hides an outlier; handled with a
   mean-abs-dev fallback and a flat-baseline override in the trend model.
-- **`scp` to OpenWrt** → no sftp-server; deploy with `cat f | ssh root@… 'cat > /root/f'`.
+- **Hand-copying files to the router** (`cat f | ssh … 'cat > …'`) → replaced by Manarat-Cyber's
+  `deploy-router.sh`, which tests, health-checks and rolls back.
 - **Restarting only the log service** cut dnsmasq from syslog → restart dnsmasq after.
 - **A conversational AI** over the data isn't available (classical ML, no LLM);
   `ask.py` is a command interpreter, not a chat bot.
@@ -117,7 +118,9 @@ python3 threats.py                       # fast log in/out + unknown entrances
 python3 ask.py                           # interactive offline terminal
 ```
 
-Deploy to the hardware with `git pull` on the Pi, and
-`cat streamwatch_v12.py | ssh root@192.168.8.1 'cat > /root/streamwatch_v12.py'`
-for the gateway (OpenWrt has no `scp`). See `handoff.md` for the full operator
-guide and `ARCHITECTURE.md` for how the pieces fit.
+**Deploying:** the live system runs from the private repo **`SaudSWE/Manarat-Cyber`**
+(`~/streamwatch-live` on the Pi) and is deployed only with its scripts —
+`deploy/deploy.sh` for the Pi services and `deploy/deploy-router.sh` for the router
+(tests, health checks, automatic rollback). Don't copy files from this repository
+onto the router: they are older copies. See `handoff.md` for the operator guide and
+`ARCHITECTURE.md` for how the pieces fit.

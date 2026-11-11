@@ -10,7 +10,7 @@ Where things run:
 |-----|---------|------|
 | Gateway **main123** (GL-MT3000, OpenWrt) | 192.168.8.1 | `streamwatch_v12.py` (procd service `streamwatch`), `group_lists.py` |
 | Nodes **acf**, **456** | 192.168.8.2 / .3 | Wi-Fi only; read by the recorder over SSH |
-| Raspberry Pi | 192.168.8.162 | `mesh_tracker.py`, `mesh_recorder.py` (service `mesh-recorder`), all analysis tools, `report-mailer.timer` |
+| Raspberry Pi | 192.168.8.162 | tracker + map, recorder, nightly report, ngrok portal, ttyd, firewall (deployed from `~/streamwatch-live`); analysis tools in `~/theSaud` |
 
 StreamWatch's options are set in `/etc/streamwatch/streamwatch.conf` on the
 gateway (`SW_EMAIL_TO`, `SW_THRESHOLD`, `SW_EXTRA`), then
@@ -20,59 +20,110 @@ gateway (`SW_EMAIL_TO`, `SW_THRESHOLD`, `SW_EXTRA`), then
 
 ## The nine functions
 
-The system's functions, what delivers each one, and where it's described.
-"Pi only" means the code or configuration lives on the Pi or the routers and
-is **not in this repository** — push it to get it documented and tested in full.
+**Where the code lives.** The deployed system runs from the private repository
+**`SaudSWE/Manarat-Cyber`** (checked out on the Pi at `~/streamwatch-live`).
+This repository (`theSaud`) holds earlier copies of the gateway and recorder
+plus offline analysis tools (section A) that are **not deployed**. Facts about
+the tracker, map, nightly report, remote access, deploys and firewall were
+verified on the Pi on 2026-11-11 (deployed commit `24b293a`). Sections G, L and
+R below are written from this repository's copies, which can differ slightly
+from the deployed ones.
 
-| # | Function | Delivered by | In repo | Reference | Tests |
-|---|----------|--------------|---------|-----------|-------|
-| 1 | **Device approval** — internet only for approved devices | gateway gate + allow/deny lists | yes | G3, G4, L | G3, G4, G4b, G4c, L1, L2 |
-| 2 | **Data monitoring** — per-device usage, 500 MB alerts, data caps | metering + `SW_THRESHOLD="500M"`, `limit()`, `throttle()`, device report | yes | G1, G6, G9, A1 | G1, G6a, G6b, G9, A1 |
-| 3 | **Email remote control** — close, open, limit, throttle, block, devices, browsing, locate, zones, calibrate | gateway email command channel | yes | G2 (table) | G2, G3, G5, G6a, G6b, G10, G11, G13, G14, G15 |
-| 4 | **Location tracking** — live positions, map, events, steering | `mesh_tracker.py` + live map (Pi only); gateway location and forbidden area; recorder events | partly | F4, G12–G15, R | M1–M4, G12–G15 |
-| 5 | **Recording** — everything into a daily CSV | `mesh_recorder.py` (`mesh-recorder` unit: Pi only) | yes | R | R1–R4 |
-| 6 | **Nightly report** — per-device daily summary email | `report_mailer.py` on a nightly schedule (schedule: Pi only) | partly | F6, A7 | N1, A7, S3 |
-| 7 | **Mesh network** — three routers, one network, seamless roaming | 802.11s on the GL-MT3000s (router config) + tracker steering | config | F7 | W1–W3 |
-| 8 | **Remote access** — router terminal and map from anywhere, behind Google sign-in | ngrok + Google login on the Pi (Pi only) | no | F8 | X1–X3 |
-| 9 | **Safety and upkeep** — safe deploys with rollback, Pi firewall, automated tests | tests in `tests/` (yes); deploy/rollback and firewall (Pi only) | partly | F9, S, T | U1–U2, S1–S2, T |
+| # | Function | Delivered by | Code lives in | Reference | Tests |
+|---|----------|--------------|---------------|-----------|-------|
+| 1 | **Device approval** — internet only for approved devices | gateway gate + allow/deny lists | Manarat-Cyber (copy here) | G3, G4, L | G3, G4, G4b, G4c, L1, L2 |
+| 2 | **Data monitoring** — per-device usage, 500 MB alerts, data caps | gateway metering, `SW_THRESHOLD="500M"`, `limit()`, `throttle()` | Manarat-Cyber (copy here) | G1, G6, G9 | G1, G6a, G6b, G9 |
+| 3 | **Email remote control** — close, open, limit, throttle, block, devices, browsing, locate, zones, calibrate | gateway email command channel | Manarat-Cyber (copy here) | G2 (table) | G2, G3, G5, G6a, G6b, G10, G11, G13, G14 |
+| 4 | **Location tracking** — live positions, map, events, steering | `mesh_tracker.py` + live map; gateway location tracing; recorder | Manarat-Cyber | F4, G12–G14, R | M1–M4, G12–G14 |
+| 5 | **Recording** — everything into a daily CSV | `mesh_recorder.py` (`mesh-recorder.service`) | Manarat-Cyber (copy here) | R | R1–R4 |
+| 6 | **Nightly report** — per-device daily summary email | `nightly_report.py` (`streamwatch-report.timer`, 00:15) | Manarat-Cyber | F6 | N1, N2 |
+| 7 | **Mesh network** — three routers, one network, roaming | 802.11s on the three GL-MT3000s + tracker steering | router config | F7 | W1–W3 |
+| 8 | **Remote access** — router terminal and map from anywhere, behind Google sign-in | ngrok + Google sign-in, ttyd | Pi config | F8 | X1–X3 |
+| 9 | **Safety and upkeep** — safe deploys with rollback, Pi firewall, automated tests | `deploy.sh`, `deploy-router.sh`, nftables, tests | Manarat-Cyber | F9, S, T | U1–U3, S1–S2, T |
 
-### F4. Location tracking (tracker and map on the Pi)
-From the system description in the recorder's data dictionary:
-- `mesh_tracker.py` estimates each device's position from Wi-Fi signal at the
-  router it's connected to (`d = 10^((A − RSSI)/(10 n))`, per-station A and n
-  from calibration) plus a particle filter — expect metres of error.
-- **Events:** ARRIVED, LEFT, HANDOVER (moved to another router), STEER,
-  APPROACHING, LEAVING, IDLE — recorded as `tracker_event` rows; positions as
-  `device_position` rows every ~10 s.
-- **Steering:** phones are sticky, so when the signal drops below −70 dBm the
-  tracker briefly disconnects the phone so it rejoins the closest router.
-- **Live map:** served by the Pi on port 8090.
-- The gateway also traces location itself (G14) and enforces the forbidden area (G15).
+### F4. Location tracking (tracker and map)
+- **Position:** `mesh_tracker.py` (service `mesh-tracker`) polls every 2 s and
+  estimates each device's distance from the router it's connected to with
+  `d = 10^((A − RSSI)/(10 n))`, then smooths it with a 300-particle filter.
+  Expect metres of error.
+- **Calibration:** per-router A and n are fitted from points marked on the map
+  and stored in `~/mesh_calibration.json` on the Pi, with indoor fingerprints
+  and surveyed router positions.
+- **States:** NEW, SETTLING, IDLE, APPROACHING Lx, LEAVING Lx, GONE.
+- **Events:** ARRIVED, HANDOVER (moved to another router, after 2 polls), LEFT
+  (unseen 30 s), STEER. Saved in `~/mesh_tracker/tracker_events.csv` and
+  recorded as `tracker_event` rows; positions as `device_position` rows.
+- **Steering:** when a phone's signal is below −75 dBm, or it is further than its
+  router's zone radius plus 2 m, for 3 polls in a row, the tracker disconnects it
+  from that router and bans it there for 8 s, so it rejoins a closer one
+  (20 s cooldown). It skips devices heard by two or more routers, devices marked
+  indoor, the phone being calibrated, and cases where no other router is at
+  least 3 dB stronger. It never kicks the Pi.
+- **Live map:** `http://192.168.8.162:8090/mesh_map.html` on the LAN (plus
+  `phone.html`); from outside, through the remote-access portal (F8).
+- The gateway also traces location itself (G14); `locate()` emails it.
 
 ### F6. Nightly report
-`report_mailer.py` builds the per-device summary (device report + Eagle-Eye
-scan) and emails it; `--hours 24` makes it a daily summary. The repo's timer
-runs it every 5 min — a nightly run needs `OnCalendar=daily` (or a set time) in
-the installed timer on the Pi.
+- `nightly_report.py` runs at **00:15** every night (`streamwatch-report.timer`,
+  catches up if the Pi was off) and covers the previous day.
+- Per device: zones, traffic, alerts, an anomaly section, new or blocked
+  devices, and the router's failed-SSH-login count.
+- Optionally one plain-English sentence per device from a small local model
+  (Ollama, on the Pi only); a sentence is used only if every number in it
+  matches the facts, otherwise a template sentence is used.
+- Sent through the router's Gmail account to the alert address. Full copies are
+  kept in `~/mesh_records/reports/report_<date>.json` and `.txt`.
+- Switched on in `~/.streamwatch_report.env` (`SW_REPORT=1`, `SW_REPORT_QWEN=1`).
+- (`report_mailer.py` in this repository is a separate, older mailer; its timer
+  is disabled on the Pi.)
 
 ### F7. Mesh network
 Three GL-MT3000 routers on OpenWrt 24.10 in an 802.11s mesh: main123 (L1,
-gateway: internet, DHCP, firewall), acf (L2) and 456 (L3) as mesh nodes —
-one network name everywhere. Roaming is helped by the tracker's steering.
-Configured on the routers; the recorder logs mesh health as `mesh_link` rows.
+gateway: internet, DHCP, firewall), acf (L2) and 456 (L3), one network name
+everywhere. Roaming is **assisted by steering**: a phone stuck on a far router
+is disconnected and banned there for 8 s, so it drops Wi-Fi for about 1–3 s and
+rejoins the nearest router. Whether the routers also use 802.11r has not been
+checked. The recorder logs mesh health as `mesh_link` rows.
 
 ### F8. Remote access
-The live map (Pi, port 8090) is published through **ngrok behind Google
-login**, so it can be opened from anywhere by approved Google accounts. The
-router terminal is published the same way. Configuration lives on the Pi.
+- `ngrok.service` on the Pi publishes **one portal address behind Google
+  sign-in**; only the alert account (`manaratcyber@gmail.com`) is let in.
+- The portal's root opens a **terminal on the router**: ttyd on the Pi,
+  listening only on `127.0.0.1:7681`, running `ssh root@192.168.8.1`.
+- `/map` on the same address opens the **live map**.
+- Config: `~/ngrok-portal.yml` (endpoints and Google sign-in policy) and
+  `~/.config/ngrok/ngrok.yml` (account token).
 
 ### F9. Safety and upkeep
-- **Automated tests:** 14 suites in `tests/`, stdlib only.
-- **Self-healing gateway:** StreamWatch restarts on boot and respawns if it
-  exits; the gate re-applies itself after a firewall reload; detection is
-  immune to boot-time clock corrections.
-- **Safe deploys with rollback** and the **Pi firewall:** configured on the Pi,
-  not in this repository.
+- **Pi deploys (`deploy/deploy.sh`):** refuses an unclean tree or a branch other
+  than `main`; pulls; runs the tests; restarts the tracker and recorder and
+  watches them for 130 s (stable PIDs, running from the deployed folder, map
+  answers 200, tracker state and records growing, no Traceback). On success it
+  records the commit in `~/.streamwatch-deployed`; on failure it rolls back to
+  the last good commit and re-checks, and as a last resort falls back to the
+  original copies in the home folder. Log: `~/streamwatch-deploy.log`.
+- **Router deploys (`deploy/deploy-router.sh`):** stages and verifies the files
+  on main123, runs the tests, then arms a **dead man's switch** (restores the
+  previous version after 300 s unless the deploy is confirmed) and a **boot
+  guard** (restores at boot if a deploy was left pending). It restarts
+  StreamWatch, checks health for 90 s (stable PID, file checksum, startup
+  banner, no Traceback, gate hooks intact, Pi still online), then confirms or
+  rolls back. A rollback never opens the gate.
+- **Pi firewall:** nftables table `streamwatch_fw` accepts SSH (22) and the map
+  (8090) only from the LAN (192.168.8.0/24) and loopback, and drops them from
+  anywhere else.
+- **Automated tests:** deploys run a compile check, the toolkit tests and the
+  recorder test (the router deploy adds the alert-email test); CI also runs the
+  nightly-report test. This repository has 14 suites of its own.
+- **Known gaps:** the tracker tests (`test_tracker_*.py`) aren't run by deploys
+  or CI; VNC (5900) and RDP (3389) listen on all interfaces with no firewall
+  rule; `~/mesh_calibration.json` is not in git.
+- **Self-healing gateway:** StreamWatch starts on boot and respawns if it exits;
+  the gate re-applies itself after a firewall reload; outage detection is immune
+  to boot-time clock corrections.
+
+**Not part of the system:** the forbidden area (cutting internet inside a zone)
+is not one of the system's functions, so it isn't documented or tested here.
 
 ---
 
@@ -109,9 +160,7 @@ on the allowed list are obeyed; old or refused commands are logged, not run.
 | `devices()` | Email back the device registry |
 | `browsing([ip])` | Email back the domains looked up |
 | `locate([ip])` | Email back where devices are |
-| `zones()` | Email back the forbidden-area status |
-| `forbid(5)` / `forbid(-55)` | Turn on the forbidden area (metres / dBm) |
-| `unforbid()` | Turn it off, restore everyone it cut |
+| `zones()` | Email back the zone status |
 | `calibrate(ip[, metres])` | Record a distance calibration point |
 
 ### G3. Close / open a device
@@ -180,14 +229,6 @@ Turns signal (dBm) into a distance range with a path-loss model.
 `--location-every 8` s. `--anchor 'iface=wlan0;name=Lab;x=10;y=4'` pins radios to
 coordinates. `--location-csv`, `--location-quiet`. Query with `locate([ip])`.
 
-### G15. Forbidden area
-Cuts internet for a device inside the zone; restores it when it leaves.
-- `--forbidden-rssi -55` (signal, recommended) or `--forbidden-radius METRES`
-- `--forbidden-iface`, `--forbidden-applies unauthorized|all`, `--forbidden-exempt`,
-  `--forbidden-margin 0.35`, `--forbidden-enter 2`, `--forbidden-exit 3`,
-  `--forbidden-cooldown 60`, `--forbidden-dry-run`
-- `forbid(…)`, `unforbid()`, `zones()` by email.
-
 ---
 
 ## L — Lists admin: `group_lists.py` (gateway)
@@ -233,7 +274,10 @@ It is **not in this repository** — it lives only on the Pi.
 
 ---
 
-## A — Analysis & model (Pi, offline, read the AI CSV)
+## A — Analysis & model (this repository only, offline, read the AI CSV)
+
+These tools exist only in `theSaud`; they are **not deployed** and aren't one of
+the nine functions. Run them by hand from `~/theSaud` on the Pi.
 
 ### A1. `device_report.py` — per-device report
 Online time and sessions (incl. the APs' own connect/disconnect events), data,
@@ -270,7 +314,8 @@ A device is any part of an IP, MAC or name.
 Builds the device report + Eagle-Eye scan and emails it.
 `--dry-run`, `--only-flagged`, `--to`, `--threshold`, `--hours 24`, `--env`
 (creds file `~/.streamwatch_env`: `EMAIL_USER`, `EMAIL_PASS`, `EMAIL_TO`).
-Scheduled by `systemd/report-mailer.timer` (repo default: every 5 min, every run).
+Its timer (`systemd/report-mailer.timer`, every 5 min) is **disabled** on the Pi;
+the nightly report (F6) is the deployed one.
 
 ---
 
@@ -280,10 +325,18 @@ Scheduled by `systemd/report-mailer.timer` (repo default: every 5 min, every run
 |------|-----|---------|
 | `openwrt/streamwatch.init` → `/etc/init.d/streamwatch` | gateway | starts on boot, respawns; `gate_down` action |
 | `openwrt/streamwatch.conf` → `/etc/streamwatch/streamwatch.conf` | gateway | email, threshold, extra flags |
-| `mesh-recorder` (systemd) | Pi | the recorder (unit file lives on the Pi) |
-| `mesh-tracker` (systemd) | Pi | the tracker (unit file lives on the Pi) |
-| `systemd/report-mailer.service` + `.timer` | Pi | scheduled report email |
+| `mesh-tracker.service` | Pi | the tracker and live map (port 8090) |
+| `mesh-recorder.service` | Pi | the recorder (starts after the tracker) |
+| `streamwatch-report.timer` + `.service` | Pi | nightly report at 00:15 |
+| `ngrok.service` | Pi | remote-access portal behind Google sign-in |
+| `ttyd.service` | Pi | router terminal for the portal (loopback only) |
+| `ollama.service` | Pi | local model for the nightly report's sentences (loopback only) |
+| `nftables.service` | Pi | the Pi firewall (`streamwatch_fw`) |
+| `/etc/init.d/sw-rollback` + watchdog | gateway | router deploy safety net (boot guard, dead man's switch) |
+| `systemd/report-mailer.service` + `.timer` | Pi | older mailer from this repository; **disabled** on the Pi |
 | NTP (router: Google time servers; Pi syncs from router) | both | correct timestamps after reboot |
+
+The Pi units come from `deploy/` in Manarat-Cyber.
 
 ## T — Automated tests
 14 suites in `tests/` (stdlib only):

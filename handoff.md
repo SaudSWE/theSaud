@@ -53,11 +53,15 @@ Components (all committed and pushed):
   - **`report_mailer.py`** + `systemd/report-mailer.{service,timer}` —
     scheduled build + email of the reports.
   - **`ask.py`** — offline command terminal to query/command the model.
-- Docs: `REQUIREMENTS.md`, `GROUP_LISTS.md`, `PORT_RULES.md`,
-  `LOCATION_FORBIDDEN_AREA.md`, and this file.
+- Docs: `FUNCTIONALITY.md`, `TESTING.md`, `REQUIREMENTS.md`, `GROUP_LISTS.md`,
+  `PORT_RULES.md`, and this file.
+- **Deployed code lives elsewhere:** the live system runs from the private repo
+  `SaudSWE/Manarat-Cyber` (`~/streamwatch-live` on the Pi), deployed with its
+  `deploy/deploy.sh` and `deploy/deploy-router.sh`. Nothing in this repository is
+  deployed.
 
-Board status: items **1–9 done**, **11 (forbidden area)** coded (needs a zone
-configured + tracker running), **Adblocker** is the user's other team,
+Board status: items **1–9 done**, **11 (forbidden area)** out of scope — not
+part of the system, **Adblocker** is the user's other team,
 **10 (IoT)** and **12 (Attack)** are TBD / not built.
 
 ---
@@ -140,8 +144,9 @@ if not yet done).
   real (non‑identical) devices clear the threshold fine.
 - **`python3 ask.py` from `~`** — fails; the scripts live in `~/theSaud`. Use
   `cd ~/theSaud` or the full path, or add an `alias ask=`.
-- **scp to OpenWrt** — no sftp‑server on the router; deploy with
-  `cat file | ssh root@192.168.8.1 'cat > /root/file'`.
+- **Hand-copying files to the router** (`cat file | ssh … 'cat > …'`) — replaced
+  by Manarat-Cyber's `deploy-router.sh`. Never copy this repository's
+  `streamwatch_v12.py` onto the router; the deployed one is newer.
 - **Restarting the log service alone** cut dnsmasq off from syslog (no DNS rows)
   → must restart dnsmasq after the log service (already in the recorder).
 - **A true conversational AI** over the data — not available: the team chose

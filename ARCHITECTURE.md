@@ -51,7 +51,7 @@ outbound traffic is optional email alerts and internet-reachability probes.
 
 **Tier A — Collect & control** (`streamwatch_v12.py` on the gateway,
 `mesh_tracker.py` on the Pi). Enforces policy at the gateway with iptables
-(chains `SW_GATE`/`SW_ZONE`/`SW_PORTS`), identifies devices by **MAC**
+(chains `SW_GATE`/`SW_PORTS`), identifies devices by **MAC**
 (Data.Identity), and emits raw signals: dnsmasq query logs, conntrack byte
 counts, radio assoc lists, `ip neigh`, and its own email/health JSON logs.
 
@@ -105,7 +105,8 @@ CSV). A feature layer, two models, a threat rule, a terminal, and a mailer.
 - **Trusting per-sample rate (`rate_in_kbps`)** — counter resets produced
   3.4 Gbps artifacts; readers cap at a sane ceiling, and true speed-impact will
   be computed from byte deltas over real intervals (a planned Tier-C addition).
-- **`scp`/sftp to OpenWrt** — unavailable; deploys stream over `ssh 'cat >'`.
+- **Hand-copying files to the router** — replaced by Manarat-Cyber's `deploy-router.sh`
+  (staged copy, checksum, tests, health check, dead man's switch, boot guard).
 
 ## 6) Next Steps — where new code attaches
 
@@ -118,8 +119,9 @@ CSV). A feature layer, two models, a threat rule, a terminal, and a mailer.
   same interface; `ask.py`, `report_mailer.py` and the CLIs are unaffected.
 - **Rotating-MAC stitching** = a resolver that collapses private MACs into one
   identity, applied in `device_report.key_of()` so the whole tier benefits.
-- **Operational** = the gateway and Pi run deployed copies; `git pull` on the
-  Pi and the `ssh 'cat >'` deploy on the gateway are the only "release" steps.
+- **Operational** = the gateway and Pi run code deployed from the private repo
+  `SaudSWE/Manarat-Cyber` by `deploy/deploy.sh` (Pi) and `deploy/deploy-router.sh`
+  (router); those scripts are the only release steps.
 
 See `README.md` for the overview, `REQUIREMENTS.md` for board/feature
 traceability, and `handoff.md` for the operator runbook.

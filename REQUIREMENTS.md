@@ -27,7 +27,7 @@ view from the board and the data.
 | 8 | Control / limitation (bandwidth, block/allow ip-port) | quotas, throttle, port rules | `sw_quota`, `sw_throttle`, `open_port` | done — **Adblocker is a separate team** |
 | 9 | Malfunction (no-internet history, device not connected) | outage + presence monitors | `malfunction` | done |
 | 10 | IoT (sensor) on/off switch | — | — | **not built (TBD)** |
-| 11 | Forbidden area | tracker zone + gate cuts internet | `tracker_event` (forbidden), `internet_access` | coded; needs zone configured |
+| 11 | Forbidden area | — | — | **out of scope** — not part of the system |
 | 12 | Attack | — | — | **not built (TBD)** |
 
 ---
