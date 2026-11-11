@@ -66,14 +66,15 @@ configured + tracker running), **Adblocker** is the user's other team,
 
 **Running continuously on the hardware:**
 - Pi: **`mesh-recorder`** systemd service — **active** (writing the CSV).
-- Pi: **`report-mailer.timer`** — installed and enabled; **every 15 min** with
-  **`--only-flagged`** (emails only when the model flags a device).
+- Pi: **`report-mailer.timer`** — installed and enabled. The repo default is now
+  **every 5 min, emailing every run** (the Eagle-Eye commit changed it); the
+  installed copy may still be 15 min + `--only-flagged` — check with TESTING.md S3.
 - Gateway: **StreamWatch** (procd service) — **active**, confirmed PID 4074
   (`--email-alert --threshold 500M --accept-commands --group-lists`; malfunction
   detection on by default).
 
 **On‑demand (run by hand / scriptable), not services:**
-- `device_report.py`, `history.py`, `anomaly_model.py`, `trend_model.py`,
+- `device_report.py`, `history.py`, `eagle_eye.py`, `trend_model.py`,
   `threats.py`, `eagle_eye.py`, `ask.py`.
 - The models only score when invoked (by you or by the mailer); none is a
   background process.

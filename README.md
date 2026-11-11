@@ -2,7 +2,11 @@
 
 Offline network monitoring, control, and anomaly detection for a home 802.11s
 Wi-Fi mesh. Runs entirely on your own hardware — no cloud, no data leaves the
-network. **415 tests, pure Python standard library.**
+network. Pure Python standard library.
+
+**Docs:** every function is described in [`FUNCTIONALITY.md`](FUNCTIONALITY.md);
+test each one yourself with the checklist in [`TESTING.md`](TESTING.md); design
+in [`ARCHITECTURE.md`](ARCHITECTURE.md); runbook in [`handoff.md`](handoff.md).
 
 ---
 
@@ -32,7 +36,8 @@ Three layers, all built and tested:
 **Analyze & model (offline, on the server — all stdlib)**
 - `device_report.py` — per-device feature report + `--csv` feature table.
 - `history.py` — time-ordered activity log of meaningful events.
-- `anomaly_model.py` — cross-device robust (median/MAD) anomaly detector.
+- `eagle_eye.py` — **Eagle-Eye (EE1)**: cross-device robust (median/MAD) anomaly
+  detector plus threat rules for sudden log-in/out (formerly `anomaly_model.py`).
 - `trend_model.py` — per-device-over-time: each device vs **its own** history.
 - `threats.py` — flags **fast log in/out** and **unknown entrances**.
 
@@ -50,9 +55,9 @@ traceability in `REQUIREMENTS.md`; design in `ARCHITECTURE.md`.
 | Component | Where | Runs | State |
 |-----------|-------|------|-------|
 | `mesh-recorder` | Pi | always (systemd) | **active** |
-| `report-mailer.timer` | Pi | every 15 min, `--only-flagged` | enabled |
+| `report-mailer.timer` | Pi | repo default every 5 min, every run (check the installed copy: TESTING.md S3) | enabled |
 | StreamWatch (gate + detection) | gateway | always (procd) | **active** (PID 4074) |
-| `device_report` / `history` / `anomaly_model` / `trend_model` / `threats` / `ask` | Pi | on demand | run by hand or by the mailer |
+| `device_report` / `history` / `eagle_eye` / `trend_model` / `threats` / `ask` | Pi | on demand | run by hand or by the mailer |
 
 The models are **not** background services — they score when invoked (by you
 or by the mailer).
@@ -63,7 +68,8 @@ or by the mailer).
 - `trend_model.py` — per-device-over-time anomaly model (`ask.py trend`).
 - `ask.py` — offline terminal to query/command the model.
 - `report_mailer.py` + systemd units — scheduled, emailed reports (safe defaults).
-- `anomaly_model.py` — first classical-ML model; high-side-only scoring.
+- `eagle_eye.py` — first classical-ML model (renamed from `anomaly_model.py`), high-side-only
+  scoring, plus threat rules (2+ fast in/outs in 10 min, or a new device flapping).
 - `device_report.py` — per-device feature report; infra/glitch filtering.
 - `history.py` — readable activity history.
 - `mesh_recorder.py` — drop the router's own DNS/boot-log noise from the CSV.
@@ -74,7 +80,7 @@ or by the mailer).
 ## 5) Failed Attempts / Lessons
 
 - **Email every minute** → would suspend the Gmail account (~1440/day); replaced
-  with every-15-min + `--only-flagged`.
+  with a slower cadence; `--only-flagged` emails only on a flag.
 - **Cross-device anomaly detection at n=4** → flags the Pi for being the server;
   fixed quiet-device false flags (high-side only); the fix is `trend_model.py`.
 - **MAD=0 masking** → identical history hides an outlier; handled with a
@@ -105,7 +111,7 @@ python3 -m pytest -q           # or: for t in tests/test_*.py; do python3 $t; do
 
 # analysis (reads ~/mesh_records on the Pi)
 python3 device_report.py                 # per-device report
-python3 anomaly_model.py ~/features.csv  # cross-device anomalies
+python3 eagle_eye.py ~/features.csv      # Eagle-Eye: cross-device anomalies + threats
 python3 trend_model.py                   # each device vs its own history
 python3 threats.py                       # fast log in/out + unknown entrances
 python3 ask.py                           # interactive offline terminal

@@ -40,13 +40,13 @@ outbound traffic is optional email alerts and internet-reachability probes.
                                  │  (same CSV, read-only)
           ┌──────────────────────┼───────────────────────────┐
           ▼                      ▼                            ▼
-   device_report.py        anomaly_model.py             history.py
+   device_report.py        eagle_eye.py                 history.py
    (features + --csv)      trend_model.py               threats.py
           │                 (classical ML, offline)            │
           └──────────┬───────────────┬─────────────────────────┘
                      ▼               ▼
                   ask.py        report_mailer.py ──► email (SMTP)
-              (offline terminal)  (systemd timer, --only-flagged)
+              (offline terminal)  (systemd timer)
 ```
 
 **Tier A — Collect & control** (`streamwatch_v12.py` on the gateway,
@@ -68,7 +68,7 @@ CSV). A feature layer, two models, a threat rule, a terminal, and a mailer.
 
 - **Long-running processes:** `streamwatch_v12.py` (gateway, procd),
   `mesh_tracker.py` + `mesh-recorder` + `report-mailer.timer` (Pi, systemd).
-- **On-demand libraries/CLIs:** `device_report`, `history`, `anomaly_model`,
+- **On-demand libraries/CLIs:** `device_report`, `history`, `eagle_eye`,
   `trend_model`, `threats`, `ask`. Each is importable (functions return data)
   and runnable (a thin `main()`); the models hold no state between runs.
 - **The one shared artifact** every Tier-C tool reads is the CSV directory;
@@ -87,7 +87,7 @@ CSV). A feature layer, two models, a threat rule, a terminal, and a mailer.
 - **Robust statistics (median/MAD), not mean/stdev.** The outliers we hunt must
   not define "normal". Heavy-tailed features are log-scaled; scoring is
   high-side only (excess, not quiet).
-- **Two complementary models.** `anomaly_model` (device vs peers) and
+- **Two complementary models.** `eagle_eye` (Eagle-Eye EE1: device vs peers) and
   `trend_model` (device vs its own history) share one `fit()/score()` contract,
   so scikit-learn can drop in later without touching callers.
 - **Block overrides allow (BR-2); default-deny gate (BR-1).** Enforced in
