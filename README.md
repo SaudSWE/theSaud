@@ -6,7 +6,9 @@ network. Pure Python standard library.
 
 **Docs:** every function is described in [`FUNCTIONALITY.md`](FUNCTIONALITY.md);
 test each one yourself with the checklist in [`TESTING.md`](TESTING.md); design
-in [`ARCHITECTURE.md`](ARCHITECTURE.md); runbook in [`handoff.md`](handoff.md).
+in [`ARCHITECTURE.md`](ARCHITECTURE.md); runbook in [`handoff.md`](handoff.md);
+the 45-feature review in [`FEATURES_CHECKLIST.md`](FEATURES_CHECKLIST.md); the
+briefing every Claude Code session loads in [`CLAUDE.md`](CLAUDE.md).
 
 ---
 
